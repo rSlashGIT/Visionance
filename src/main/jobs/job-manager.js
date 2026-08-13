@@ -191,6 +191,8 @@ class JobManager extends EventEmitter {
       sourceMetadata: job.sourceMetadata,
       verification: job.verification || null,
       plan: job.plan || null,
+      cost: job.cost || null,
+      neuralRate: job.neuralRate || null,
       aiMetrics: job.aiMetrics || null,
       reframe: job.reframe || null
     };
@@ -507,7 +509,11 @@ class JobManager extends EventEmitter {
 
       const planned = pipeline.planStages(recipe, analysis, geometry, {
         chunked: plan.enabled,
-        neural: isNeural
+        neural: isNeural,
+        // The engine planner has already decided; the stage list must agree
+        // with it rather than with what the recipe asked for.
+        neuralUpscale: !!aiPlan.upscale,
+        neuralInterpolate: !!aiPlan.interpolate
       });
       job.stages = planned.stages;
       job.plan = {
@@ -522,8 +528,12 @@ class JobManager extends EventEmitter {
           upscale: aiPlan.upscale ? {
             model: aiPlan.upscale.model.name,
             inferenceScale: aiPlan.upscale.inferenceScale,
+            preScale: aiPlan.upscale.preScale || 1,
             downscaleAfter: aiPlan.upscale.downscaleAfter,
+            quality: aiPlan.upscale.quality,
+            qualityLabel: aiPlan.upscale.qualityLabel,
             reason: aiPlan.upscale.reason,
+            tradeoff: aiPlan.upscale.tradeoff || null,
             gpu: aiPlan.upscale.gpuId
           } : null,
           interpolate: aiPlan.interpolate ? {
@@ -534,6 +544,15 @@ class JobManager extends EventEmitter {
           } : null
         } : null
       };
+      // Cost is classified from the resolved plan, so it sees the model, the
+      // pre-scale and whether the neural pass survived. Classifying the Auto
+      // recipe instead is how a job running x4 inference got labelled `fast`.
+      job.cost = pipeline.estimatePlanCost({
+        stages: planned.stages,
+        geometry,
+        aiPlan,
+        durationSeconds: plan.totalDuration
+      });
       job.pauseSupported = plan.enabled && plan.chunks.length > 1;
 
       /* ---- disk safety ---- */
@@ -612,11 +631,18 @@ class JobManager extends EventEmitter {
           job.reframe = {
             backend: subject.backend,
             backendLabel: subject.backendLabel,
+            // The reconciled summary, not a second opinion assembled here.
+            outcome: subject.outcome,
+            samples: subject.samples,
+            tracked: subject.tracked,
+            held: subject.held,
+            centred: subject.centred,
+            coverage: subject.coverage,
             confidence: subject.confidence,
-            samples: subject.points.length,
-            cuts: (cuts.cuts || []).length,
-            holds: subject.holds,
-            fallbacks: subject.fallbacks,
+            scenes: subject.scenes,
+            headline: subject.headline,
+            detail: subject.detail,
+            keyedPositions: expr.points,
             static: expr.static
           };
           for (const n of subject.notes) job.warnings = addWarning(job.warnings, n);
@@ -825,6 +851,67 @@ class JobManager extends EventEmitter {
   }
 
   /**
+   * What would this recipe cost, without starting anything?
+   *
+   * Resolves the same plan a real run would - geometry, the engine planner's
+   * verdict on which model and inference path, the stage list - and classifies
+   * it. Reusing the run's own resolution is the point: a preview derived from
+   * the recipe alone is exactly the thing that labelled an x4 inference job
+   * `fast`.
+   *
+   * Creates no job, touches no disk, spawns nothing.
+   *
+   * @returns {Promise<{cost, plan, geometry, notes:string[]}>}
+   */
+  async previewPlan(recipe, analysis) {
+    const geometry = recipes.resolveOutputGeometry(recipe, analysis);
+    const preliminary = pipeline.planStages(recipe, analysis, geometry, { chunked: false });
+
+    let aiPlan = { upscale: null, interpolate: null, notes: [] };
+    if (preliminary.requiresChunking && this.engines) {
+      try {
+        aiPlan = await neural.planNeural({ recipe, analysis, geometry, engines: this.engines });
+      } catch (err) {
+        // A missing engine is a real answer for a preview: report it as a note
+        // rather than failing the panel the user is still editing.
+        return {
+          cost: null,
+          geometry,
+          notes: [err && err.message ? err.message : 'Neural stages are unavailable.'],
+          unavailable: true
+        };
+      }
+    }
+
+    const durationSeconds = (analysis.derived && analysis.derived.durationSeconds) || 0;
+    const stages = pipeline.planStages(recipe, analysis, geometry, {
+      chunked: false,
+      neural: !!(aiPlan.upscale || aiPlan.interpolate),
+      neuralUpscale: !!aiPlan.upscale,
+      neuralInterpolate: !!aiPlan.interpolate
+    }).stages;
+
+    return {
+      cost: pipeline.estimatePlanCost({ stages, geometry, aiPlan, durationSeconds }),
+      geometry,
+      plan: {
+        description: pipeline.describePlan(stages),
+        neural: aiPlan.upscale ? {
+          model: aiPlan.upscale.model.name,
+          inferenceScale: aiPlan.upscale.inferenceScale,
+          preScale: aiPlan.upscale.preScale || 1,
+          quality: aiPlan.upscale.quality,
+          qualityLabel: aiPlan.upscale.qualityLabel,
+          reason: aiPlan.upscale.reason,
+          tradeoff: aiPlan.upscale.tradeoff || null
+        } : null,
+        interpolate: aiPlan.interpolate ? { model: aiPlan.interpolate.model.label } : null
+      },
+      notes: aiPlan.notes || []
+    };
+  }
+
+  /**
    * Progress for a stage the neural pipeline is driving.
    * Unlike _runStage this does not own the stage's lifecycle - the neural
    * pipeline moves between UPSCALE, INTERPOLATE and ENCODE many times per
@@ -843,6 +930,18 @@ class JobManager extends EventEmitter {
     // is the chunk fraction rather than a per-stage weighting.
     job.progress = Math.min(0.99, stage.progress);
     if (metrics && metrics.framesPerSecond) job.fps = metrics.framesPerSecond;
+
+    // A neural job has no ffmpeg `speed` to report, so the rate is measured
+    // from frames the network has actually finished.
+    if (metrics && metrics.neuralFramesTotal) {
+      const rate = updateNeuralRate(job, {
+        framesDone: metrics.neuralFramesDone || 0,
+        framesTotal: metrics.neuralFramesTotal,
+        startedAt: metrics.neuralStartedAt
+      });
+      if (rate) job.fps = rate.framesPerSecond;
+    }
+
     if (job.totalDuration) job.processedDuration = job.totalDuration * job.progress;
     job.eta = estimateEta(job);
     this._emitThrottled(job);
@@ -1140,6 +1239,10 @@ function neuralChunkSeconds(recipe, geometry) {
   const w = geometry.sourceWidth || 1920;
   const h = geometry.sourceHeight || 1080;
   const fps = geometry.sourceFps || 30;
+  // Chunk length is a disk decision, so it uses the scale the *frames on disk*
+  // will land at. This runs before the engine planner, so it takes the
+  // requested scale as the worst case; a pre-scaled path simply needs less than
+  // this reserved, which is the safe direction to be wrong in.
   const scale = recipe.reconstruction.mode === 'neural'
     ? Math.max(1, recipe.reconstruction.aiScale || 1)
     : 1;
@@ -1149,10 +1252,71 @@ function neuralChunkSeconds(recipe, geometry) {
   return Math.max(5, Math.min(120, seconds));
 }
 
+/**
+ * How many frames must be behind us before a remaining-time figure means
+ * anything. The first frames of a neural job include model load, Vulkan
+ * warm-up and the tile search, so an estimate taken from them is wrong by a
+ * factor that matters.
+ */
+const ETA_MIN_FRAMES = 12;
+const ETA_MIN_ELAPSED_MS = 8000;
+/** Exponential smoothing on the rate. Enough to stop the number dancing. */
+const ETA_SMOOTHING = 0.25;
+
+/**
+ * Remaining time from frames that have actually been processed.
+ *
+ * Two different jobs need two different sources of truth:
+ *   - a fused ffmpeg encode reports `speed` (multiples of realtime), which is
+ *     exactly what it says on the tin
+ *   - a neural job has no such thing, so the rate comes from frames completed
+ *     against wall clock, smoothed, and is not offered at all until enough
+ *     frames exist to make it honest
+ */
 function estimateEta(job) {
+  const neural = job.neuralRate;
+  if (neural && neural.framesPerSecond > 0 && neural.framesRemaining > 0) {
+    return Math.round(neural.framesRemaining / neural.framesPerSecond);
+  }
   if (!job.totalDuration || !job.speed || job.speed <= 0) return null;
   const remaining = Math.max(0, job.totalDuration - (job.processedDuration || 0));
   return Math.round(remaining / job.speed);
 }
 
-module.exports = { JobManager, TRANSITIONS, TERMINAL, moveIntoPlace };
+/**
+ * Fold one progress report into the job's rolling processing rate.
+ * Mutates `job.neuralRate` and returns it, or null while it is too early.
+ */
+function updateNeuralRate(job, { framesDone, framesTotal, startedAt }) {
+  if (!framesTotal || framesTotal <= 0) return null;
+  const elapsed = Date.now() - (startedAt || job.startedAt || Date.now());
+  if (framesDone < ETA_MIN_FRAMES || elapsed < ETA_MIN_ELAPSED_MS) {
+    // Say nothing rather than something wrong. The queue shows the cost class
+    // in the meantime, which is a claim we can actually support.
+    job.neuralRate = {
+      framesDone, framesTotal, framesRemaining: framesTotal - framesDone,
+      framesPerSecond: 0, warming: true
+    };
+    return null;
+  }
+  const instant = (framesDone * 1000) / elapsed;
+  const previous = (job.neuralRate && job.neuralRate.framesPerSecond) || 0;
+  const smoothed = previous > 0
+    ? previous + (instant - previous) * ETA_SMOOTHING
+    : instant;
+  job.neuralRate = {
+    framesDone,
+    framesTotal,
+    framesRemaining: Math.max(0, framesTotal - framesDone),
+    framesPerSecond: Math.round(smoothed * 1000) / 1000,
+    warming: false
+  };
+  return job.neuralRate;
+}
+
+module.exports = {
+  JobManager, TRANSITIONS, TERMINAL, moveIntoPlace,
+  // Exported for the verification harnesses: the rate maths is the part that
+  // decides whether a remaining time is honest, so it is tested directly.
+  updateNeuralRate, estimateEta, ETA_MIN_FRAMES, ETA_MIN_ELAPSED_MS
+};

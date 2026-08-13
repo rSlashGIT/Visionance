@@ -194,9 +194,14 @@ function canvasStep(recipe, geometry, has, opts = {}) {
           `crop=w=min(iw\\,ih*${round3(w / h)}):h=ih:x='min(max(${reframe.expr}\\,0)\\,iw-ow)':y=0`,
           `scale=${w}:${h}:flags=${flags}`
         ],
+        // Geometry only. Whether the tracking *succeeded* is not something a
+        // filter builder can know - it can only see whether the compiled
+        // expression is a constant - and claiming it here is how a job ended
+        // up saying "the crop follows the subject" next to "the subject could
+        // not be located". The outcome is summarised once, in tracking.js.
         note: reframe.static
-          ? `Smart Reframe: subject was static, so the ${w}×${h} crop is fixed.`
-          : `Smart Reframe: the ${w}×${h} crop follows the subject across ${reframe.points} positions.`,
+          ? `Smart Reframe crop into ${w}×${h}, fixed for the whole clip.`
+          : `Smart Reframe crop into ${w}×${h}, moving across ${reframe.points} keyed positions.`,
         unusedCropW: cropW
       };
     }

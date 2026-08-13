@@ -31,6 +31,10 @@ app.setPath('userData', USER_DATA);
 if (!process.env.VISIONANCE_BIN_DIR) {
   process.env.VISIONANCE_BIN_DIR = path.join(REAL_USER_DATA, 'bin');
 }
+if (!process.env.VISIONANCE_ENGINES_DIR) {
+  // Engines are expensive to install; read them from the real installation.
+  process.env.VISIONANCE_ENGINES_DIR = path.join(REAL_USER_DATA, 'engines');
+}
 
 /* ------------------------------------------------------------------ *
  * Test media
@@ -179,7 +183,7 @@ const SNAP = `(() => {
     width: v.videoWidth, height: v.videoHeight,
     readyState: v.readyState, paused: v.paused,
     currentTime: v.currentTime,
-    currentSrc: (v.currentSrc || '').slice(0, 90),
+    currentSrc: v.currentSrc || '',
     title: document.getElementById('brandSub').textContent,
     urlBox: document.getElementById('urlInput').value,
     errorCode: v.error ? v.error.code : null
@@ -391,6 +395,10 @@ async function run() {
 
   await js(`document.querySelector('.tab[data-tab="create"]').click(); true`);
   await sleep(200);
+  // Create no longer follows Watch implicitly, so aim it explicitly - through
+  // the button a user would press.
+  await js(`document.getElementById('createUseWatchBtn').click(); true`);
+  await sleep(400);
   await js(`(() => {
     const p = document.getElementById('createPlatform');
     p.value = 'youtube-shorts';
@@ -503,12 +511,257 @@ async function run() {
     `${outDuration.toFixed(2)}s vs 5s source`);
 
   const reframeShown = await js(`(() => {
-    const cards = [...document.querySelectorAll('.job .job-plan')].map(n => n.textContent);
+    const cards = [...document.querySelectorAll('.job .job-reframe')].map(n => n.textContent);
     return cards.join(' | ');
   })()`);
-  check('the Queue card shows the backend and confidence',
-    /saliency|motion/i.test(reframeShown) && /confidence/i.test(reframeShown),
-    reframeShown.slice(0, 160));
+  check('the Queue card shows the backend and the reconciled counters',
+    /saliency/i.test(reframeShown) && /Tracked \d+ of \d+/.test(reframeShown),
+    reframeShown.slice(0, 200));
+  // The defect this replaced: a success percentage printed beside a failure
+  // warning. Whatever the card says, it must not say both.
+  check('the card never claims success and failure at once',
+    !(/could not be tracked/i.test(reframeShown) && /confidence \d+%/i.test(reframeShown)),
+    reframeShown.slice(0, 200));
+
+  /* ------------------------------------------------------------------ *
+   * Watch and Create hold different sources
+   *
+   * The two used to share `state.media`, so choosing something to render
+   * changed what was playing, and opening something to watch silently
+   * re-aimed a render that was being set up.
+   * ------------------------------------------------------------------ */
+
+  const CREATE = `(() => {
+    const el = (id) => document.getElementById(id);
+    return {
+      createTitle: el('createSourceTitle').textContent,
+      aspect: el('createAspect').value,
+      res: el('createRes').value,
+      framing: el('createFraming').value,
+      aiQuality: el('createAiQuality').value,
+      geometryNote: el('createGeometryNote').textContent,
+      costHidden: el('createCostPreview').hidden,
+      costClass: el('createCostClass').textContent,
+      costDetail: el('createCostDetail').textContent
+    };
+  })()`;
+
+  // Watch is playing A; Create is pointed at B.
+  openFile(CLIPS.a);
+  await waitFor('watch A', loadedAt(640, 360));
+  await js(`document.querySelector('.tab[data-tab="create"]').click(); true`);
+  await sleep(200);
+
+  // Drive the real "use current Watch video" button first.
+  await js(`document.getElementById('createUseWatchBtn').click(); true`);
+  await sleep(500);
+  let panel = await js(CREATE);
+  check('"Use current Watch video" populates Create',
+    /clip-a/i.test(panel.createTitle), panel.createTitle);
+  let watch = await js(SNAP);
+  check('...without disturbing Watch', watch.width === 640 && !watch.paused,
+    `${watch.width}x${watch.height} paused=${watch.paused}`);
+
+  // Now point Create somewhere else entirely, through the main-process route
+  // the file picker uses. The dialog is answered by the harness.
+  electron.dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [CLIPS.d] });
+  await js(`document.getElementById('createOpenFileBtn').click(); true`);
+  await waitFor('create source B', `/clip-d/i.test(document.getElementById('createSourceTitle').textContent)`, 20000);
+  panel = await js(CREATE);
+  watch = await js(SNAP);
+  check('Create can hold a different source from Watch',
+    /clip-d/i.test(panel.createTitle), panel.createTitle);
+  check('choosing a Create source leaves Watch playing untouched',
+    watch.width === 640 && watch.height === 360 && !watch.paused,
+    `${watch.width}x${watch.height} paused=${watch.paused} t=${watch.currentTime.toFixed(1)}`);
+  check('...and Watch is still on its own file',
+    /clip-a/i.test(decodeURIComponent(watch.currentSrc)), watch.currentSrc);
+
+  const watchTimeBefore = watch.currentTime;
+
+  /* ---- geometry controls ---- */
+  const setAspect = async (value) => {
+    await js(`(() => {
+      const a = document.getElementById('createAspect');
+      a.value = ${JSON.stringify(value)};
+      a.dispatchEvent(new Event('change'));
+      return true;
+    })()`);
+    await sleep(250);
+  };
+
+  const aspectOptions = await js(
+    `[...document.getElementById('createAspect').options].map(o => o.value)`);
+  for (const wanted of ['source', '16:9', '9:16', '4:5', '1:1', '21:9', '2.39:1', 'custom']) {
+    check(`aspect ratio ${wanted} is offered`, aspectOptions.includes(wanted), aspectOptions.join(','));
+  }
+
+  await setAspect('16:9');
+  panel = await js(CREATE);
+  check('16:9 suggests a 16:9 resolution',
+    /1920 × 1080|1920 . 1080/.test(panel.geometryNote) || /1920/.test(panel.geometryNote),
+    panel.geometryNote);
+
+  await setAspect('21:9');
+  panel = await js(CREATE);
+  check('21:9 is reachable without picking a social platform',
+    /2560/.test(panel.geometryNote), panel.geometryNote);
+
+  await setAspect('custom');
+  await js(`(() => {
+    const w = document.getElementById('createAspectW');
+    const h = document.getElementById('createAspectH');
+    w.value = '12'; h.value = '5';
+    w.dispatchEvent(new Event('input'));
+    return true;
+  })()`);
+  await sleep(300);
+  const customRowVisible = await js(`!document.getElementById('createAspectCustomRow').hidden`);
+  check('a custom ratio exposes its own inputs', customRowVisible);
+  panel = await js(CREATE);
+  check('a custom ratio resolves to a real size', /\d+ × \d+/.test(panel.geometryNote), panel.geometryNote);
+
+  // Custom resolution, with validation.
+  await setAspect('16:9');
+  await js(`(() => {
+    const r = document.getElementById('createRes');
+    r.value = 'custom';
+    r.dispatchEvent(new Event('change'));
+    const w = document.getElementById('createResW');
+    const h = document.getElementById('createResH');
+    w.value = '2560'; h.value = '1080';
+    w.dispatchEvent(new Event('input'));
+    return true;
+  })()`);
+  await sleep(300);
+  panel = await js(CREATE);
+  check('a custom resolution is accepted', /2560 × 1080/.test(panel.geometryNote), panel.geometryNote);
+  check('a resolution that disagrees with the ratio is explained, not stretched',
+    /not 16:9|framing setting decides/i.test(panel.geometryNote), panel.geometryNote);
+
+  /* ---- cost preview from the resolved plan ---- */
+  await js(`(() => {
+    const r = document.getElementById('createRes');
+    r.value = 'auto'; r.dispatchEvent(new Event('change'));
+    return true;
+  })()`);
+  await js(`document.getElementById('analyseBtn').click(); true`);
+  await waitFor('create analysis', `document.getElementById('analysisGrid').children.length > 0`, 40000);
+  await sleep(800);
+  panel = await js(CREATE);
+  check('a plain render is previewed as fast',
+    !panel.costHidden && /fast/i.test(panel.costClass),
+    `${panel.costClass} — ${panel.costDetail}`);
+
+  const enginesReady = await js(`(async () => {
+    const r = await window.visionance.engines.status();
+    return r.ok && r.engines.realesrgan && r.engines.realesrgan.status === 'ready';
+  })()`);
+
+  if (enginesReady) {
+    // Ask for a neural upscale and confirm the preview stops saying "fast".
+    await js(`(() => {
+      const ai = document.getElementById('createAi');
+      ai.value = '2'; ai.dispatchEvent(new Event('change'));
+      const q = document.getElementById('createAiQuality');
+      q.value = 'maximum'; q.dispatchEvent(new Event('change'));
+      return true;
+    })()`);
+    await sleep(1500);
+    panel = await js(CREATE);
+    check('a Maximum x4 job is never previewed as fast',
+      !/fast/i.test(panel.costClass), `${panel.costClass} — ${panel.costDetail}`);
+    check('the preview names the model and the frame size it will run on',
+      /realesrgan|animevideov3/i.test(panel.costDetail), panel.costDetail);
+
+    const maxDetail = panel.costDetail;
+    await js(`(() => {
+      const q = document.getElementById('createAiQuality');
+      q.value = 'balanced'; q.dispatchEvent(new Event('change'));
+      return true;
+    })()`);
+    await sleep(1500);
+    const balanced = await js(CREATE);
+    check('Balanced previews a different, cheaper plan than Maximum',
+      balanced.costDetail !== maxDetail, `${balanced.costClass} — ${balanced.costDetail}`);
+
+    await js(`(() => {
+      const ai = document.getElementById('createAi');
+      ai.value = 'off'; ai.dispatchEvent(new Event('change'));
+      return true;
+    })()`);
+    await sleep(800);
+  } else {
+    console.log('  note: Real-ESRGAN not installed, neural cost preview not exercised');
+  }
+
+  /* ---- Watch survived all of that ---- */
+  watch = await js(SNAP);
+  // The clip is six seconds long, so by now it may legitimately have ended.
+  // What matters is that it kept its own source, kept advancing, and was never
+  // torn down by anything Create did.
+  check('Watch played straight through the entire Create session',
+    watch.width === 640 && watch.currentTime > watchTimeBefore &&
+    watch.errorCode === null && /clip-a/i.test(decodeURIComponent(watch.currentSrc)),
+    `t ${watchTimeBefore.toFixed(1)} -> ${watch.currentTime.toFixed(1)} err=${watch.errorCode}`);
+
+  /* ---- a running job keeps the source it started with ---- */
+  await setAspect('9:16');
+  await js(`(() => {
+    const f = document.getElementById('createFraming');
+    f.value = 'smart'; f.dispatchEvent(new Event('change'));
+    return true;
+  })()`);
+  await sleep(200);
+
+  const jobsBefore = await js(`(async () => (await window.visionance.jobs.list()).jobs.length)()`);
+  await js(`document.getElementById('startCreateBtn').click(); true`);
+  await waitFor('job queued', `(async () => {
+    const r = await window.visionance.jobs.list();
+    return r.ok && r.jobs.length > ${jobsBefore};
+  })()`, 20000);
+
+  const startedJob = await js(`(async () => {
+    const r = await window.visionance.jobs.list();
+    const j = r.jobs[r.jobs.length - 1];
+    return { id: j.id, title: j.title, source: j.source, status: j.status };
+  })()`);
+  check('the queued job took the Create source, not the Watch one',
+    /clip-d/i.test(JSON.stringify(startedJob.source)), JSON.stringify(startedJob.source));
+
+  // Change the Create source while it runs, and change Watch too.
+  electron.dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [CLIPS.c] });
+  await js(`document.getElementById('createOpenFileBtn').click(); true`);
+  await waitFor('create source C', `/clip-c/i.test(document.getElementById('createSourceTitle').textContent)`, 20000);
+  openFile(CLIPS.b);
+  await waitFor('watch C', loadedAt(854, 480));
+
+  const afterChange = await js(`(async () => {
+    const r = await window.visionance.jobs.list();
+    const j = r.jobs.find(x => x.id === ${JSON.stringify(startedJob.id)});
+    return j ? { source: j.source, status: j.status, title: j.title } : null;
+  })()`);
+  check('changing the Create source does not re-aim the running job',
+    /clip-d/i.test(JSON.stringify(afterChange.source)), JSON.stringify(afterChange.source));
+  check('changing the Watch source does not re-aim the running job',
+    !/clip-b/i.test(JSON.stringify(afterChange.source)), JSON.stringify(afterChange.source));
+  check('the job is still alive after both sources changed underneath it',
+    !['failed', 'cancelled'].includes(afterChange.status), afterChange.status);
+
+  // ...and it finishes.
+  const finished = await waitFor('background render finishes', `(async () => {
+    const r = await window.visionance.jobs.list();
+    const j = r.jobs.find(x => x.id === ${JSON.stringify(startedJob.id)});
+    if (!j) return null;
+    return (j.status === 'completed' || j.status === 'failed') ? j : null;
+  })()`, 180000, 1000);
+  check('a render started from Create completes while Watch carries on',
+    finished.status === 'completed',
+    finished.status + (finished.error ? ` — ${finished.error.message}` : ''));
+
+  watch = await js(SNAP);
+  check('Watch is still playing its own, newer source after the render finished',
+    watch.width === 854 && !watch.paused, `${watch.width}x${watch.height} paused=${watch.paused}`);
 
   /* ---- repeated switching must not leak ---- */
   const before = process.memoryUsage().heapUsed;

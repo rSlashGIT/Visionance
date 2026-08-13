@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('visionance', {
 
   recipe: {
     platforms: () => invoke('recipe:platforms'),
+    aspects: () => invoke('recipe:aspects'),
     default: (analysis, overrides) => invoke('recipe:default', analysis, overrides),
     fromPreview: (params, analysis, overrides) => invoke('recipe:fromPreview', params, analysis, overrides),
     applyPlatform: (recipe, platformId) => invoke('recipe:applyPlatform', recipe, platformId),
@@ -70,6 +71,7 @@ contextBridge.exposeInMainWorld('visionance', {
 
   jobs: {
     list: () => invoke('jobs:list'),
+    preview: (request) => invoke('jobs:preview', request),
     create: (request) => invoke('jobs:create', request),
     start: (id) => invoke('jobs:start', id),
     cancel: (id) => invoke('jobs:cancel', id),

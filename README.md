@@ -123,12 +123,23 @@ memory or written to disk.
 ## Create
 
 The **Create** tab renders a real file with ffmpeg, and the **Queue** tab tracks
-it. What works today:
+it.
+
+**Create has its own source.** Choose a file, paste a URL, or press *Use current
+Watch video* — and whatever Watch is playing keeps playing. The two used to
+share one source object, so picking something to render changed what was on
+screen, and opening something to watch silently re-aimed the render you were
+setting up. A render also takes an immutable snapshot of its source when you
+press the button: changing the Create panel afterwards, or opening something
+else in Watch, cannot re-aim a job that is already running.
+
+What works today:
 
 | Setting | What it does |
 |---|---|
-| **Target** | Custom, YouTube, YouTube 4K, YouTube Shorts, Instagram Reels, Instagram feed (4:5), TikTok. Seeds canvas, container, codec and audio bitrate — everything stays editable. |
-| **Output resolution** | Source, the target's resolution, or a fixed size up to 4K. Classical (Lanczos) resampling. |
+| **Target** | Custom, YouTube, YouTube 4K, YouTube Shorts, Instagram Reels, Instagram feed (4:5), TikTok. *Seeds* aspect ratio, resolution, container, codec and audio bitrate — and then gets out of the way. |
+| **Aspect ratio** | Source, 16:9, 9:16, 4:5, 1:1, 21:9, 2.39:1, or a custom `w : h`. A first-class control: you never have to pretend to target TikTok to get a vertical crop. |
+| **Output resolution** | The ratio's suggestion, source, a fixed size up to 4K, or custom dimensions. While it is on *Suggested* a ratio change moves it; once you type a size, that size is kept and any mismatch with the ratio is explained rather than stretched away. |
 | **Reframing** | Smart Reframe (follows the subject), centre crop to fill, letterbox on a blurred copy of the frame, or letterbox on black. Shown whenever the target reshapes the canvas. |
 | **Frame rate** | 24 / 25 / 30 / 48 / 50 / 60 / 120, or keep the source rate. Classical conversion duplicates and drops frames; AI interpolation (below) generates new ones. |
 | **Encoder** | Automatic (prefers a detected hardware encoder) or an explicit one. NVENC / Quick Sync / AMF / VideoToolbox / VA-API when ffmpeg reports them. |
@@ -156,10 +167,45 @@ better. Content profiles: `Auto / General`, `Film / Cinematic`,
 `Low Light`, `Screencast / Text`. Intensity: `Light`, `Balanced`, `Strong`,
 `Maximum`.
 
+Auto is also **performance-aware**: it chooses an inference quality, not just a
+scale. Only an explicit *Maximum* intensity reaches the full-pixel 4× path; a
+badly damaged source climbing a long way (480p → 1080p) earns full-size
+inference at *Strong*; everything else reaches the scale the cheap way. Left at
+the old default, a 2× request on general footage ran the 4× network over every
+source pixel — 12.66 s per 720p frame, or roughly 53 minutes for a ten-second
+clip. That is not a default; that is a surprise.
+
 Auto only ever *proposes*. The result is an ordinary recipe you can edit, and
-changing one control does not reset the rest. Each job is given a cost class —
-`fast`, `moderate`, `heavy`, `very heavy` — rather than a fabricated ETA, since
-a real ETA is not knowable before any frames have been processed.
+changing one control does not reset the rest.
+
+### Knowing what a render will cost
+
+Every job carries a cost class — `Fast`, `Moderate`, `Heavy`, `Very heavy` —
+and Create shows it *before* you render, with the reasoning:
+
+```
+HEAVY     1920×1080 · realesrgan-x4plus at x4 on 1280×720 frames
+          ≈ 32m of inference · roughly 32 minutes on hardware like this
+MODERATE  1920×1080 · realesrgan-x4plus at x4 on 640×360 frames
+          ≈ 8m of inference · roughly 8 minutes on hardware like this
+```
+
+Crucially this is derived from the **resolved** plan — after the engine planner
+has chosen a model and decided whether the network runs on full-size or
+pre-scaled frames — not from the recipe beforehand. A job that is about to run
+x4 inference can never be labelled `Fast`, which is what the old estimate did.
+
+Once enough frames have genuinely been processed, the Queue replaces the class
+with a measured rate and a remaining time:
+
+```
+13%   0.42 fps   126/300 frames   ~7m left
+```
+
+Nothing is estimated before there is data to estimate from: the first frames of
+a neural job include model load, Vulkan warm-up and the tile search, so until
+twelve frames and eight seconds are behind it the queue says `measuring rate…`
+rather than a number that would be wrong.
 
 ### Smart Reframe (16:9 → 9:16)
 
@@ -180,13 +226,28 @@ of the normal filter graph.
 - **Fallbacks are stable.** A lost detection holds the last good position; a clip
   with nothing trackable stays centred and says so. Tracking failing never fails
   the export.
-- **It is a control, not a hidden mode.** Whenever the target reshapes the
-  canvas, Create's *Reframing* picker offers `Smart Reframe (follow the
-  subject)`, `Centre crop to fill`, `Fit, blurred background` and `Fit, black
-  bars`. Smart Reframe is the default, Auto selects it for a 9:16 target, and
-  the choice survives a round trip through the recipe — so what the control
-  shows is what the render executes. The Queue card then reports the backend
-  that ran and the confidence it achieved.
+- **It is a control, not a hidden mode.** Whenever the output ratio differs
+  from the source, Create's *Reframing* picker offers `Smart Reframe (follow
+  the subject)`, `Centre crop to fill`, `Fit, blurred background` and `Fit,
+  black bars`. Smart Reframe is the default, Auto selects it for a 9:16 target,
+  and the choice survives a round trip through the recipe — so what the control
+  shows is what the render executes.
+- **The Queue reports one reconciled account of what happened**, not three
+  competing ones:
+
+  ```
+  Smart Reframe · Motion & detail saliency
+  Tracked 34 of 40 samples · confidence 78%
+  4 scenes · 6 held near the previous crop
+  ```
+
+  `tracked + held + centred` always equals the sample count, confidence is the
+  mean over the samples that were *used* rather than over every sample the
+  detector looked at, and the warning — when there is one — comes from the same
+  summary as the numbers. A failure message can no longer appear beside a
+  fabricated success metric. If tracking genuinely fails, the card says
+  `Subject could not be tracked reliably; centre framing was used.` and quotes
+  no confidence at all.
 
 ### Colour and audio finishing
 
@@ -229,10 +290,50 @@ be configured in a terminal.
 | Control | What it does |
 |---|---|
 | **Neural enhancement** | `Off`, `Restore` (repair at the current size), `Upscale 2×`, `Upscale 4×` — Real-ESRGAN. |
+| **Inference quality** | `Fast`, `Balanced`, `Quality`, `Maximum` — how much inference to spend reaching that scale. Four genuinely different paths, not four names for one. |
 | **Model** | `Auto`, `General` (live action), `Animation` (anime/cel). |
 | **Interpolation** | `Off`, `Classical` (ffmpeg duplicates frames), `AI` (RIFE invents new ones). These are never conflated. |
 | **Scene-cut protection** | Detects hard cuts and interpolates each shot separately. |
 | **Advanced** | GPU choice, manual tile size, scene-cut sensitivity, installed model list. |
+
+**About inference quality, honestly.** Output scale and inference quality are
+different questions. `realesrgan-x4plus` has 4× weights and nothing else, so
+reaching 2× with it is a *choice*, and the wrong choice costs hours. Measured
+on the reference laptop (GTX 1650 Ti, 8 frames per run):
+
+| 720p source → 2× output | seconds/frame |
+|---|---|
+| 4× network on the full frame, Lanczos back down | **12.66** |
+| 4× network on a half-size frame, exact 2× | **3.61** (3.5× faster) |
+| `realesr-animevideov3` native 2× | **0.64** (19.9× faster) |
+
+So the four modes take four different routes:
+
+| Mode | With native weights at the scale | Without them (General 2×) |
+|---|---|---|
+| **Fast** | native inference | **no inference** — classical reconstruction, and it says so |
+| **Balanced** | native inference | 4× network on a half-size frame → exact 2× |
+| **Quality** | native inference | 4× network on every source pixel → Lanczos down |
+| **Maximum** | largest native scale → Lanczos down | largest native scale → Lanczos down |
+
+For General at 2× that is three implementations, not four: Quality and Maximum
+converge, because there is no larger native scale for `realesrgan-x4plus` to
+reach for. The panel says so — it describes the plan the engine actually
+resolved rather than four descriptions of one thing.
+
+The Balanced row is a real technique, not a shortcut: these networks are
+trained to reconstruct from degraded low-resolution input, so a half-size frame
+into a 4× model is exactly the job they were built for, and cost follows input
+area. It *is* lower fidelity than Quality — half the source detail never
+reaches the network — which is why it is called Balanced, and why the panel
+says which path it took.
+
+**Is there a native General 2× model?** No, and Visionance does not pretend
+otherwise. `RealESRGAN_x2plus` exists upstream as PyTorch weights, but the
+official ncnn portable release ships no x2 param/bin for it, and community
+conversions have no published provenance or checksums. Native 2× exists only
+for the Animation model (`realesr-animevideov3`), where it is used by every
+quality mode because it is both real and fast.
 
 **About scale, honestly.** These models have a native scale baked into their
 weights and there is no 1× model. So:
@@ -476,7 +577,7 @@ the app downloads it on request.
 
 ## Verification
 
-Eight harnesses:
+Nine harnesses:
 
 ```bash
 npm run verify:creator   # Auto decisions, Smart Reframe trajectories, colour
@@ -487,10 +588,14 @@ npm run verify:core      # recipe schema, chunk planning, path safety, error
 npm run verify:watch     # stream-height policy, Watch codec ranking, the
                          # chunked range proxy, presentation-rate maths at
                          # eight source frame rates, framing control mapping
+npm run verify:create    # aspect-ratio geometry and validation, resolved-plan
+                         # cost classification, Auto's inference-quality
+                         # decisions, Smart Reframe telemetry consistency
 npm run verify:switch    # boots the app and drives real source switching
                          # through the real controls: local↔URL↔URL, races,
-                         # Play-button semantics, and a Smart Reframe render
-                         # started from the Create panel
+                         # Play-button semantics, Watch/Create independence,
+                         # job source snapshots, background rendering, and a
+                         # Smart Reframe render started from the Create panel
 npm run verify:gl        # compiles every shader in a real GL context,
                          # renders each preset, checks for GL errors
 npm run verify:export    # real ffmpeg renders through the real job system:
@@ -520,8 +625,8 @@ logic, and never conflates the two: if no engine is installed it says
 `Real neural inference: NOT TESTED` and still exits non-zero on any core
 failure.
 
-`verify:core`, `verify:watch` and `verify:export` need no network and do not
-depend on any particular website being reachable. On a headless Linux box, prefix the Electron
+`verify:core`, `verify:watch`, `verify:create` and `verify:export` need no
+network and do not depend on any particular website being reachable. On a headless Linux box, prefix the Electron
 harnesses with `xvfb-run -a`.
 
 ---
@@ -556,8 +661,14 @@ harnesses with `xvfb-run -a`.
   frame. Progressive MP4 links play fine.
 - **AI engines are a large download** — about 45 MB for Real-ESRGAN and 430 MB
   for RIFE, because the RIFE release bundles every model version.
-- **Neural renders are slow**, as neural renders are. Measure with a short clip
-  before committing to a long one.
+- **Neural renders are slow**, as neural renders are — but how slow is now a
+  setting rather than a fixed cost. The measured spread on a GTX 1650 Ti is
+  0.55 to 0.16 frames per second depending on inference quality, so read the
+  cost class before starting a long one.
+- **There is no native General 2× model**, so Fast declines neural 2× on live
+  action entirely and reconstructs classically. That is a visible quality
+  difference and the panel says so. Animation has genuine native 2× weights and
+  uses them at every quality setting.
 - **The AI engines' releases publish no per-asset checksums**, so downloads are
   verified by size and by the archive unpacking cleanly rather than by a
   published hash. The managed Node runtime *is* SHA-256 verified, because

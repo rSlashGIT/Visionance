@@ -965,6 +965,23 @@ function registerIpc() {
   /* ---------- jobs ---------- */
 
   handle('jobs:list', () => ok({ jobs: jobs.list() }));
+
+  /** What a recipe would cost, resolved the same way a real run resolves it. */
+  handle('jobs:preview', async (_e, request = {}) => {
+    if (!request.analysis || !request.recipe) {
+      throw new VisionanceError(CODES.INVALID_REQUEST, {
+        message: 'A cost preview needs a source analysis and a recipe.'
+      });
+    }
+    const { recipe } = recipes.sanitize(request.recipe);
+    return ok(await jobs.previewPlan(recipe, request.analysis));
+  });
+
+  /** Aspect-ratio catalogue and the resolution each one suggests. */
+  handle('recipe:aspects', () => ok({
+    aspects: recipes.ASPECTS,
+    canvases: Object.keys(recipes.CANVASES)
+  }));
   handle('jobs:create', async (_e, request) => {
     if (!request || typeof request !== 'object') {
       throw new VisionanceError(CODES.INVALID_REQUEST, { message: 'A job request is required.' });

@@ -187,9 +187,60 @@ function coreEngines() {
   check(native2x.inferenceScale === 2 && !native2x.downscaleAfter,
     'a native 2x model runs at 2x with no downscale', native2x.reason);
 
-  const fake2x = realesrgan.planInference({ mode: 'upscale', scale: 2, modelId: 'general', available: models });
-  check(fake2x.inferenceScale === 4 && fake2x.downscaleAfter,
-    '2x from a 4x-only model is honestly 4x plus a downscale', fake2x.reason);
+  /* ---- inference quality: four names, four implementations ----
+   *
+   * The 4x-only General model has no native 2x weights, so what happens when
+   * 2x is asked for is entirely a quality decision. Measured on the reference
+   * GPU at 720p: full-frame x4 is 12.66 s/frame, half-frame x4 is 3.61.
+   */
+  const at = (quality) => realesrgan.planInference({
+    mode: 'upscale', scale: 2, modelId: 'general', available: models, quality
+  });
+
+  const fast = at('fast');
+  check(fast.neural === false,
+    'Fast declines a 4x network for a 2x result and says so', fast.reason);
+  check(typeof fast.tradeoff === 'string' && /classical|resampled/i.test(fast.tradeoff),
+    'Fast labels its own quality cost honestly', fast.tradeoff);
+
+  const balanced = at('balanced');
+  check(balanced.neural && balanced.inferenceScale === 4 && balanced.preScale === 0.5 &&
+    !balanced.downscaleAfter && balanced.effectiveScale === 2,
+  'Balanced runs the 4x network on a half-size frame for an exact 2x', balanced.reason);
+
+  const quality = at('quality');
+  check(quality.neural && quality.inferenceScale === 4 && quality.preScale === 1 &&
+    quality.downscaleAfter,
+  'Quality runs the 4x network on every source pixel then resamples down', quality.reason);
+
+  const maximum = at('maximum');
+  check(maximum.neural && maximum.inferenceScale === 4 && maximum.preScale === 1 &&
+    maximum.downscaleAfter,
+  'Maximum keeps the full-pixel 4x path', maximum.reason);
+
+  // The four are genuinely different, not four names for one thing.
+  const signature = (p) => `${p.neural}|${p.inferenceScale}|${p.preScale}|${p.downscaleAfter}`;
+  check(new Set([fast, balanced, quality].map(signature)).size === 3,
+    'Fast, Balanced and Quality are three different implementations');
+
+  // Where the model really has native weights, every mode uses them...
+  const nativeFast = realesrgan.planInference({
+    mode: 'upscale', scale: 2, modelId: 'animation', available: models, quality: 'fast'
+  });
+  check(nativeFast.neural && nativeFast.inferenceScale === 2 && nativeFast.preScale === 1,
+    'a native 2x model is used natively even in Fast', nativeFast.reason);
+
+  // ...except Maximum, which is allowed to spend more on purpose.
+  const nativeMax = realesrgan.planInference({
+    mode: 'upscale', scale: 2, modelId: 'animation', available: models, quality: 'maximum'
+  });
+  check(nativeMax.inferenceScale === 4 && nativeMax.downscaleAfter,
+    'Maximum reconstructs at the largest native scale even when 2x weights exist', nativeMax.reason);
+
+  // Every path must land on the scale that was actually requested.
+  for (const p of [balanced, quality, maximum, nativeFast, nativeMax]) {
+    check(p.effectiveScale === 2, `every neural path reaches the requested 2x (${p.reason})`);
+  }
 
   const restore = realesrgan.planInference({ mode: 'restore', scale: 1, modelId: 'animation', available: models });
   check(restore.inferenceScale === 2 && restore.downscaleAfter,

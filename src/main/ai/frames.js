@@ -84,7 +84,18 @@ async function runFfmpeg({ bin, args, durationSeconds, control, onProgress, what
  * @returns {Promise<{produced:number, dir:string}>}
  */
 async function extractFrames({
-  ffmpeg, input, headers = null, startSeconds = 0, frameCount, fps, outDir, control, onProgress
+  ffmpeg, input, headers = null, startSeconds = 0, frameCount, fps, outDir, control, onProgress,
+  /**
+   * Pre-neural filters: tone map, deinterlace, crop, denoise/deblock, and the
+   * Balanced pre-scale.
+   *
+   * This parameter was previously absent while `processChunk` passed one
+   * anyway, so the whole pre-neural chain was silently discarded and the
+   * network was fed raw decoded frames - compression artefacts and all, which
+   * is precisely what a super-resolution model must not be taught to
+   * reconstruct.
+   */
+  filters = null
 }) {
   ensureEmptyDir(outDir);
 
@@ -98,8 +109,9 @@ async function extractFrames({
   args.push('-i', input);
 
   // `fps=` pins the grid: a VFR source becomes an exact ladder of frames, which
-  // is what the interpolation planner's arithmetic assumes.
-  args.push('-vf', `fps=${fps}`);
+  // is what the interpolation planner's arithmetic assumes. It goes first so
+  // the frame count is decided before anything spatial touches the picture.
+  args.push('-vf', filters ? `fps=${fps},${filters}` : `fps=${fps}`);
   args.push('-frames:v', String(frameCount));
   args.push('-fps_mode', 'passthrough');
   args.push('-start_number', '1');

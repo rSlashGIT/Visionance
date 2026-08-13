@@ -85,6 +85,23 @@
     dualStream: false,
     jobs: new Map(),
     analysis: null,        // full source analysis for the loaded media
+
+    /**
+     * Create's own source, deliberately not `state.media`.
+     *
+     * A descriptor and its analysis, never a player handle. Watch owns the
+     * video element; Create owns an intention to render something. Sharing one
+     * object meant choosing a file to render changed what was playing, and
+     * opening something to watch silently re-aimed a render being set up.
+     */
+    createSource: null,
+    createAnalysis: null,
+    previewTimer: null,
+    previewGeneration: 0,
+    /** The plan the main process resolved for the current panel state. */
+    resolvedPlan: null,
+    aspects: {},
+
     analysisPending: false,
     platforms: {},
     encoders: [],
@@ -130,10 +147,15 @@
     'createSourceTitle', 'analyseBtn', 'analysisGrid', 'analysisNote',
     'autoBlock', 'autoState', 'autoProfile', 'autoIntensity', 'autoBuildBtn', 'autoExplain',
     'createPreset', 'recipeName', 'saveRecipeBtn', 'savedRecipeList', 'sendToCreateBtn',
+    'createOpenFileBtn', 'createUseWatchBtn', 'createUrlInput', 'createUrlBtn',
     'createPlatform', 'createRes', 'createFraming', 'createFramingRow', 'createFramingHelp', 'createFps',
+    'createAspect', 'createAspectCustomRow', 'createAspectW', 'createAspectH',
+    'createResCustomRow', 'createResW', 'createResH', 'createGeometryNote',
+    'createCostPreview', 'createCostClass', 'createCostDetail',
     'createEncoder', 'createQuality', 'createQualityVal', 'createUseLook',
     'createAudio', 'createLoudness', 'createChunked', 'startCreateBtn', 'recipeWarnings',
     'aiBlock', 'aiEngineState', 'createAi', 'createAiModelRow', 'createAiModel', 'createAiNote',
+    'createAiQualityRow', 'createAiQuality', 'createAiQualityNote',
     'createInterp', 'createSceneRow', 'createScene', 'createSceneHelp', 'createFpsHelp',
     'installEnginesBtn', 'engineProgress', 'createGpu', 'createTile',
     'createSceneThreshold', 'createSceneThresholdVal', 'createModelDetail',
@@ -457,7 +479,8 @@
       state.presentation = null;
       state.media = null;
       state.analysis = null;
-      state.autoResult = null;
+      // Deliberately NOT state.createSource: Create holds its own source, and
+      // changing what Watch is playing must not disturb a render being set up.
       state.resumeKey = null;
       state.lastSavedPosition = 0;
       state.source.token = null;
@@ -553,7 +576,6 @@
       /* ---- 5. presentation, resume, playback ---- */
       applyPresentationMode();
       updateResBadge();
-      refreshCreateSource();
       api.system.keepAwake(true);
 
       api.recents.add({
@@ -1199,7 +1221,14 @@
   }
 
   async function populatePlatforms() {
-    const res = await api.recipe.platforms();
+    const [res, aspectRes] = await Promise.all([
+      api.recipe.platforms(),
+      api.recipe.aspects()
+    ]);
+    if (aspectRes.ok) {
+      state.aspects = aspectRes.aspects;
+      populateAspects();
+    }
     if (!res.ok) return;
     state.platforms = res.platforms;
     el.createPlatform.innerHTML = '';
@@ -1211,33 +1240,137 @@
     }
     const saved = state.settings.create && state.settings.create.lastPlatform;
     if (saved && state.platforms[saved]) el.createPlatform.value = saved;
-    syncPlatformUi();
+    syncPlatformUi({ seedGeometry: true });
   }
 
-  function syncPlatformUi() {
+  /**
+   * A platform *suggests* geometry; it does not own it.
+   *
+   * Picking a target moves the aspect control to what that platform wants and
+   * then stops. The user can immediately change it, and nothing here reaches
+   * back to overrule them - which is what "platform presets must not make
+   * direct geometry control impossible" means in practice.
+   */
+  function syncPlatformUi({ seedGeometry = false } = {}) {
     const platform = state.platforms[el.createPlatform.value];
-    const shapesCanvas = !!(platform && platform.canvas && platform.canvas !== 'source');
-    el.createFramingRow.hidden = !shapesCanvas;
-    el.createFramingHelp.hidden = !shapesCanvas;
-    if (shapesCanvas && el.createRes.value === 'source') el.createRes.value = 'platform';
-    if (!shapesCanvas && el.createRes.value === 'platform') el.createRes.value = 'source';
+    const canvas = platform && platform.canvas;
+
+    if (seedGeometry) {
+      const wanted = canvas && canvas !== 'source' ? canvas : 'source';
+      if ([...el.createAspect.options].some((o) => o.value === wanted)) {
+        el.createAspect.value = wanted;
+      }
+      // A platform with an exact size gets it; otherwise the ratio's own
+      // suggestion applies.
+      if (platform && platform.width && platform.height) {
+        const wh = `${platform.width}x${platform.height}`;
+        el.createRes.value = [...el.createRes.options].some((o) => o.value === wh) ? wh : 'auto';
+      } else {
+        el.createRes.value = wanted === 'source' ? 'source' : 'auto';
+      }
+    }
+    syncGeometryUi();
+  }
+
+  /* ------------------------------------------------------------------ *
+   * The Create source
+   *
+   * Create keeps its own source, separate from what Watch is playing. They
+   * used to be the same object, which meant choosing something to render
+   * changed what was on screen, and opening something to watch silently
+   * re-aimed the Create panel at it. Both are surprising; the second one is
+   * dangerous, because it happened while a render was being set up.
+   *
+   * `state.createSource` is a descriptor, not a player: it never touches the
+   * video element, so nothing Create does can interrupt playback.
+   * ------------------------------------------------------------------ */
+
+  /** Take an immutable snapshot of a source descriptor for Create to hold. */
+  function snapshotSource(descriptor, analysis) {
+    if (!descriptor) return null;
+    return {
+      kind: descriptor.kind,
+      source: descriptor.source,
+      title: descriptor.title || descriptor.source,
+      // A remote source keeps only the page URL. The job re-resolves it when it
+      // runs, because a direct CDN URL will have expired by then, and because a
+      // long render must not depend on the Watch tab's live stream session.
+      webpageUrl: descriptor.kind === 'stream' ? descriptor.source : null,
+      // Top level on the descriptor, not inside `info` - a snapshot that
+      // looked for it in the wrong place would never refuse a live stream.
+      isLive: !!descriptor.isLive,
+      info: descriptor.info || null,
+      analysis: analysis || descriptor.analysis || null,
+      selectedAt: Date.now()
+    };
+  }
+
+  async function setCreateSource(snapshot) {
+    state.createSource = snapshot;
+    state.createAnalysis = (snapshot && snapshot.analysis) || null;
+    state.autoResult = null;
+    state.recipeState = 'custom';
+    el.autoState.textContent = snapshot ? 'Ready — press Suggest settings' : 'Choose a source first';
+    refreshCreateSource();
+    syncGeometryUi();
+    schedulePreview();
+  }
+
+  async function createOpenFile() {
+    const res = await api.dialog.openVideo();
+    if (!res.ok) return;
+    const opened = await api.media.open(res.files[0]);
+    if (!opened.ok) return reportFailure(opened);
+    await setCreateSource(snapshotSource(opened, opened.analysis));
+    toast('Create source set. Watch is untouched.', 'ok', 3500);
+  }
+
+  async function createOpenUrl() {
+    const raw = (el.createUrlInput.value || '').trim();
+    if (!raw) return toast('Paste a video URL first.', 'warn');
+    el.createUrlBtn.disabled = true;
+    el.createUrlBtn.textContent = 'Resolving…';
+    // Resolved purely to identify and describe the source. The token is
+    // released immediately: the job re-resolves the page URL when it runs, so
+    // nothing long-lived depends on a session that expires in hours.
+    const res = await api.media.resolveUrl(raw, { watchQuality: 'quality' });
+    el.createUrlBtn.disabled = false;
+    el.createUrlBtn.textContent = 'Load';
+    if (!res.ok) return reportFailure(res);
+    if (res.isLive) {
+      api.media.releaseStream(res.streamToken).catch(() => {});
+      return toast('Live streams cannot be rendered to a file.', 'warn', 6000);
+    }
+    const snapshot = snapshotSource(res, null);
+    api.media.releaseStream(res.streamToken).catch(() => {});
+    await setCreateSource(snapshot);
+    toast(`Create source: ${snapshot.title}`, 'ok', 4000);
+  }
+
+  async function createUseWatchSource() {
+    if (!state.media) return toast('Nothing is playing in Watch.', 'warn');
+    await setCreateSource(snapshotSource(state.media, state.analysis));
+    toast('Create is now aimed at the Watch video.', 'ok', 3500);
   }
 
   function refreshCreateSource() {
-    if (!state.media) {
+    const src = state.createSource;
+    if (!src) {
       el.createSourceTitle.textContent = 'No source selected';
       el.analysisGrid.innerHTML = '';
-      el.analysisNote.textContent = 'Open a video in Watch, then come back.';
+      el.analysisNote.textContent =
+        'Choose a video, paste a URL, or use whatever Watch is playing.';
       return;
     }
-    el.createSourceTitle.textContent = state.media.title || state.media.source;
-    renderAnalysis(state.analysis);
+    el.createSourceTitle.textContent = src.title || src.source;
+    renderAnalysis(state.createAnalysis);
   }
 
   function renderAnalysis(analysis) {
     el.analysisGrid.innerHTML = '';
     if (!analysis) {
-      el.analysisNote.textContent = state.media && state.media.kind === 'stream'
+      const src = state.createSource;
+      el.analysisNote.textContent = src && src.kind === 'stream'
         ? 'Online sources are analysed when the render starts. Press Analyse to probe now.'
         : 'Not analysed yet.';
       return;
@@ -1277,21 +1410,36 @@
   }
 
   async function analyseSource() {
-    if (!state.media) return toast('Open a video first.', 'warn');
+    const src = state.createSource;
+    if (!src) return toast('Choose a Create source first.', 'warn');
     if (state.analysisPending) return;
     state.analysisPending = true;
     el.analyseBtn.textContent = 'Analysing…';
 
-    const target = state.media.kind === 'local'
-      ? state.media.source
-      : { token: state.media.streamToken, leg: 'video' };
-    const res = await api.media.analyze(target, { deep: state.media.kind === 'local' });
+    let res;
+    if (src.kind === 'local') {
+      res = await api.media.analyze(src.source, { deep: true });
+    } else {
+      // A remote source has no live session here by design, so probe it by
+      // re-resolving it for the length of this call only.
+      const resolved = await api.media.resolveUrl(src.webpageUrl || src.source, { watchQuality: 'quality' });
+      if (!resolved.ok) {
+        state.analysisPending = false;
+        el.analyseBtn.textContent = 'Analyse';
+        return reportFailure(resolved, 'That source could not be resolved for analysis.');
+      }
+      res = await api.media.analyze({ token: resolved.streamToken, leg: 'video' }, { deep: false });
+      api.media.releaseStream(resolved.streamToken).catch(() => {});
+    }
 
     state.analysisPending = false;
     el.analyseBtn.textContent = 'Analyse';
     if (!res.ok) return reportFailure(res, 'The source could not be analysed.');
-    state.analysis = res.analysis;
-    renderAnalysis(state.analysis);
+    state.createAnalysis = res.analysis;
+    if (state.createSource) state.createSource.analysis = res.analysis;
+    renderAnalysis(state.createAnalysis);
+    syncGeometryUi();
+    schedulePreview();
   }
 
   /* ------------------------------------------------------------------ *
@@ -1425,8 +1573,13 @@
 
     const usingAi = el.createAi.value !== 'off';
     el.createAiModelRow.hidden = !usingAi;
+    el.createAiQualityRow.hidden = !usingAi;
+    el.createAiQualityNote.hidden = !usingAi;
     el.createAiNote.hidden = !usingAi;
-    if (usingAi) el.createAiNote.textContent = describeAiChoice();
+    if (usingAi) {
+      el.createAiNote.textContent = describeAiChoice();
+      el.createAiQualityNote.textContent = describeAiQuality();
+    }
 
     const interpAi = el.createInterp.value === 'ai';
     el.createSceneRow.hidden = !interpAi;
@@ -1454,6 +1607,57 @@
     el.createModelDetail.textContent = describeInstalledModels();
   }
 
+  /**
+   * What the chosen inference quality actually does, in this configuration.
+   *
+   * Four names pointing at one implementation would be a lie, so this says
+   * which path each one takes for the model that is actually selected - and
+   * where a mode declines to run the network at all, it says that too.
+   */
+  function describeAiQuality() {
+    // Prefer what the engine planner actually resolved. Four names pointing at
+    // one implementation would be a lie, and so would four *descriptions* of
+    // one implementation: for General at 2x, Quality and Maximum genuinely
+    // converge, because there is no larger native scale to reach for. Reading
+    // the resolved plan says so instead of implying a difference.
+    const resolved = state.resolvedPlan && state.resolvedPlan.neural;
+    if (resolved && resolved.reason) {
+      const bits = [`This will run ${resolved.reason}.`];
+      if (resolved.tradeoff) bits.push(resolved.tradeoff);
+      return bits.join(' ');
+    }
+    if (state.resolvedPlan && !state.resolvedPlan.neural && el.createAi.value !== 'off') {
+      return 'No neural inference will run for this combination; the resize is classical. ' +
+        'Detail is resampled and sharpened rather than reconstructed.';
+    }
+
+    const quality = el.createAiQuality.value;
+    const animation = el.createAiModel.value === 'animation';
+    const scale = el.createAi.value;
+    const nativeAtScale = animation && (scale === '2' || scale === '4');
+
+    if (scale === 'restore') {
+      return quality === 'maximum'
+        ? 'Maximum: restoration runs at the model’s largest native scale, then resamples back down. Slowest and most thorough.'
+        : 'Restoration runs at the model’s smallest native scale, then resamples back down.';
+    }
+    if (nativeAtScale) {
+      return quality === 'maximum'
+        ? `Maximum: runs the 4× network and resamples down to ${scale}×, even though native ${scale}× weights exist. Much slower, marginally more reconstruction.`
+        : `This model has native ${scale}× weights, so every quality setting runs a real ${scale}× inference. Fast on this hardware.`;
+    }
+    switch (quality) {
+      case 'fast':
+        return 'Fast: this model has no native weights at that scale, so Fast uses classical reconstruction instead of running its 4× network over every pixel. Visibly softer than the neural paths, and by far the quickest.';
+      case 'balanced':
+        return 'Balanced: runs the 4× network on a half-size frame to land on an exact 2×. About a quarter of the inference — measured 3.5× faster — reconstructing from less source detail than Quality.';
+      case 'quality':
+        return 'Quality: runs the 4× network on every source pixel and resamples down. The most detail the model can use, and slow.';
+      default:
+        return 'Maximum: the largest native scale over every source pixel, then a resample down. The slowest path there is; measured about 12.7s per 720p frame on a GTX 1650 Ti.';
+    }
+  }
+
   /** Say plainly what the network will do, including the downscale step. */
   function describeAiChoice() {
     const value = el.createAi.value;
@@ -1465,9 +1669,12 @@
         : 'Restores at the source resolution: a native 4× pass, then a high-quality downscale. There is no 1× model.';
     }
     if (value === '2') {
+      // What happens next is the inference-quality control's business, and it
+      // explains itself directly below. Saying "runs at 4× and is downscaled"
+      // here would be true of only two of the four settings.
       return animation
-        ? 'Native 2× reconstruction.'
-        : 'The General model is 4×-only, so 2× runs at 4× and is downscaled. Animation has native 2×.';
+        ? 'Native 2× reconstruction — this model really has 2× weights.'
+        : 'The General model is 4×-only, so how 2× is reached depends on the inference quality below.';
     }
     if (value === '4') return 'Native 4× reconstruction. Slow and memory-hungry on large sources.';
     return '';
@@ -1522,18 +1729,80 @@
     }
   }
 
+  /* ------------------------------------------------------------------ *
+   * Cost preview
+   *
+   * Resolved by the main process the same way a real run resolves it, because
+   * a preview computed from the recipe alone cannot see which model was
+   * chosen, whether the network runs on full-size or pre-scaled frames, or
+   * whether the neural pass survived at all. That blind spot is exactly how a
+   * job executing x4 inference was labelled `fast`.
+   * ------------------------------------------------------------------ */
+
+  function schedulePreview() {
+    clearTimeout(state.previewTimer);
+    state.previewTimer = setTimeout(refreshCostPreview, 250);
+  }
+
+  async function refreshCostPreview() {
+    if (!state.createSource || !state.createAnalysis) {
+      state.resolvedPlan = null;
+      el.createCostPreview.hidden = true;
+      return;
+    }
+    const generation = ++state.previewGeneration;
+    const recipe = await buildCurrentRecipe(null);
+    if (!recipe || generation !== state.previewGeneration) return;
+
+    const res = await api.jobs.preview({ recipe, analysis: state.createAnalysis });
+    if (generation !== state.previewGeneration) return;
+    if (!res.ok || !res.cost) {
+      state.resolvedPlan = null;
+      el.createCostPreview.hidden = true;
+      return;
+    }
+
+    // The resolved plan is the truth about what the network will do, so the
+    // inference-quality note reads from it rather than from a parallel guess.
+    state.resolvedPlan = res.plan || null;
+    syncAiUi();
+
+    el.createCostPreview.hidden = false;
+    el.createCostClass.textContent = res.cost.label;
+    el.createCostClass.className = `cost-class ${res.cost.class}`;
+
+    const bits = [];
+    if (res.geometry && res.geometry.width) {
+      bits.push(`${res.geometry.width}×${res.geometry.height}`);
+    }
+    for (const reason of res.cost.reasons) bits.push(reason);
+    // A magnitude, never a countdown. The real remaining time appears in the
+    // queue once frames have actually been processed.
+    if (res.cost.seconds >= 120) {
+      bits.push(`roughly ${fmtCoarse(res.cost.seconds)} on hardware like this`);
+    }
+    el.createCostDetail.textContent = bits.join(' · ');
+  }
+
+  /** Deliberately coarse: an order of magnitude, not a promise. */
+  function fmtCoarse(seconds) {
+    if (seconds < 120) return 'under two minutes';
+    if (seconds < 3600) return `${Math.round(seconds / 60)} minutes`;
+    return `${(seconds / 3600).toFixed(1)} hours`;
+  }
+
   /** Ask Auto what it would do, and show its reasoning before committing. */
   async function runAuto() {
-    if (!state.media) return toast('Open a video first.', 'warn');
-    if (!state.analysis) {
+    if (!state.createSource) return toast('Choose a Create source first.', 'warn');
+    if (!state.createAnalysis) {
       await analyseSource();
-      if (!state.analysis) return;
+      if (!state.createAnalysis) return;
     }
     el.autoBuildBtn.disabled = true;
     el.autoState.textContent = 'Thinking…';
 
     const res = await api.auto.build({
-      analysis: state.analysis,
+      analysis: state.createAnalysis,
       platform: el.createPlatform.value,
       profile: el.autoProfile.value,
       intensity: el.autoIntensity.value,
@@ -1549,7 +1818,9 @@
     state.recipeState = 'auto';
     applyRecipeToControls(res.recipe);
     renderAutoExplanation(res);
-    el.autoState.textContent = res.cost.replace('-', ' ') + ' job';
+    // The state chip says whether these are still Auto's settings, not what
+    // they cost - the cost preview owns that, from the resolved plan.
+    el.autoState.textContent = 'Auto settings applied';
     el.autoState.classList.add('ready');
   }
 
@@ -1558,9 +1829,13 @@
     el.autoExplain.innerHTML = '';
     const head = document.createElement('p');
     head.className = 'auto-head';
+    // Deliberately no cost here. Auto's own estimate runs before the engine
+    // planner has chosen a model or decided whether the network runs on
+    // full-size frames, so it is the weaker of two claims about the same
+    // thing - and two numbers in one panel that can disagree is worse than
+    // one. The cost preview above the render button resolves the real plan.
     head.textContent = (res.profileInferred ? 'Detected' : 'Chosen') +
-      ' profile: ' + res.profile + ' · ' + res.intensity +
-      ' · ' + res.cost.replace('-', ' ') + ' job';
+      ' profile: ' + res.profile + ' · ' + res.intensity;
     el.autoExplain.appendChild(head);
 
     for (const line of res.explanations) {
@@ -1592,6 +1867,7 @@
         ? 'restore'
         : String(r.reconstruction.aiScale);
       el.createAiModel.value = r.reconstruction.model || 'auto';
+      el.createAiQuality.value = r.reconstruction.aiQuality || 'balanced';
     } else {
       el.createAi.value = 'off';
     }
@@ -1601,16 +1877,38 @@
     el.createFps.value = r.output.fps ? String(r.output.fps) : 'source';
     el.createScene.checked = r.motion.sceneCutProtection !== false;
 
-    if (r.framing.enabled && r.framing.width) {
-      el.createRes.value = 'platform';
+    // Aspect ratio, then resolution, then framing - read back in the same
+    // three-part shape they are written in.
+    if (r.framing.enabled && r.framing.canvas && r.framing.canvas !== 'source') {
+      el.createAspect.value = [...el.createAspect.options].some((o) => o.value === r.framing.canvas)
+        ? r.framing.canvas : 'custom';
+      if (r.framing.canvas === 'custom') {
+        if (r.framing.aspectW) el.createAspectW.value = String(r.framing.aspectW);
+        if (r.framing.aspectH) el.createAspectH.value = String(r.framing.aspectH);
+      }
       // Read tracking back too. Losing it here is what made Auto announce
       // "Smart Reframe enabled" while the control underneath said centre crop
       // and the render obeyed the control.
       el.createFraming.value = framingChoiceFor(r.framing);
-    } else if (r.reconstruction.targetResolution.mode === 'custom') {
-      const wh = r.reconstruction.targetResolution.width + 'x' +
-        r.reconstruction.targetResolution.height;
-      el.createRes.value = [...el.createRes.options].some((o) => o.value === wh) ? wh : 'source';
+    } else {
+      el.createAspect.value = 'source';
+    }
+
+    const target = r.reconstruction.targetResolution;
+    if (target.mode === 'custom' && target.width && target.height) {
+      const wh = target.width + 'x' + target.height;
+      const suggestion = suggestedResolutionFor(currentAspect());
+      if (suggestion && suggestion.width === target.width && suggestion.height === target.height) {
+        // It is exactly what the ratio suggests, so leave it on automatic and
+        // let a later ratio change move it.
+        el.createRes.value = 'auto';
+      } else if ([...el.createRes.options].some((o) => o.value === wh)) {
+        el.createRes.value = wh;
+      } else {
+        el.createRes.value = 'custom';
+        el.createResW.value = String(target.width);
+        el.createResH.value = String(target.height);
+      }
     } else {
       el.createRes.value = 'source';
     }
@@ -1623,7 +1921,9 @@
     // full mastering picker, so Auto's choice would otherwise be lost.
     state.audioMaster = r.audio.master || 'preserve';
     syncPlatformUi();
+    syncGeometryUi();
     syncAiUi();
+    schedulePreview();
   }
 
   function markRecipeModified() {
@@ -1637,7 +1937,7 @@
 
   async function applyCreatorPreset(id) {
     if (!id) return;
-    const res = await api.creatorPresets.apply(id, { analysis: state.analysis, outputPath: null });
+    const res = await api.creatorPresets.apply(id, { analysis: state.createAnalysis, outputPath: null });
     if (!res.ok) return reportFailure(res, 'That preset could not be applied.');
     state.recipeState = 'custom';
     applyRecipeToControls(res.recipe);
@@ -1725,6 +2025,144 @@
     return framing.background === 'black' ? 'fit-black' : 'fit';
   }
 
+  /* ------------------------------------------------------------------ *
+   * Geometry: target, aspect, resolution
+   *
+   * Four related settings that are not the same setting. The target seeds the
+   * other three and then gets out of the way; aspect ratio decides the shape;
+   * resolution decides the pixel count; framing decides what happens to the
+   * picture when the source shape and the output shape disagree. Before this,
+   * shape was only reachable by picking a social platform, which meant a
+   * 21:9 master was not expressible at all.
+   * ------------------------------------------------------------------ */
+
+  function populateAspects() {
+    el.createAspect.innerHTML = '';
+    for (const aspect of Object.values(state.aspects)) {
+      const opt = document.createElement('option');
+      opt.value = aspect.id;
+      opt.textContent = aspect.label;
+      el.createAspect.appendChild(opt);
+    }
+    el.createAspect.value = 'source';
+  }
+
+  /** The ratio the aspect control currently describes, or null for source. */
+  function currentAspect() {
+    const id = el.createAspect.value;
+    if (id === 'source') return null;
+    if (id === 'custom') {
+      const w = Number(el.createAspectW.value);
+      const h = Number(el.createAspectH.value);
+      return w > 0 && h > 0 ? { id: 'custom', ratio: w / h, w, h } : null;
+    }
+    const preset = state.aspects[id];
+    if (!preset) return null;
+    // Ids whose label is not their arithmetic. "21:9" is universally 64:27.
+    const IRREGULAR = { '21:9': [64, 27], '2.39:1': [239, 100] };
+    const [w, h] = IRREGULAR[id] || id.split(':').map(Number);
+    return { id, ratio: w / h, w, h };
+  }
+
+  /** Resolution the current ratio suggests, honouring the long edge. */
+  function suggestedResolutionFor(aspect) {
+    if (!aspect) return null;
+    const preset = state.aspects[aspect.id];
+    if (preset && preset.suggested) return { ...preset.suggested };
+    const even = (v) => { const n = Math.max(16, Math.round(v)); return n % 2 ? n + 1 : n; };
+    return aspect.ratio >= 1
+      ? { width: 1920, height: even(1920 / aspect.ratio) }
+      : { width: even(1080 * aspect.ratio), height: 1920 };
+  }
+
+  /**
+   * Reflect the geometry controls into each other.
+   *
+   * The rule for resolution is intent-preserving: while it is on `auto` a
+   * ratio change moves it, and once the user has chosen a size themselves that
+   * choice is left alone even if it no longer matches the ratio - they are
+   * told about the mismatch rather than overruled.
+   */
+  function syncGeometryUi() {
+    const aspect = currentAspect();
+    el.createAspectCustomRow.hidden = el.createAspect.value !== 'custom';
+    el.createResCustomRow.hidden = el.createRes.value !== 'custom';
+
+    const suggestion = suggestedResolutionFor(aspect);
+    const autoOption = [...el.createRes.options].find((o) => o.value === 'auto');
+    if (autoOption) {
+      autoOption.textContent = suggestion
+        ? `Suggested for this ratio — ${suggestion.width} × ${suggestion.height}`
+        : 'Suggested for this ratio';
+    }
+
+    const notes = [];
+    const srcInfo = state.createAnalysis && state.createAnalysis.video;
+    const srcW = srcInfo ? (state.createAnalysis.derived.displayWidth || srcInfo.width) : 0;
+    const srcH = srcInfo ? (state.createAnalysis.derived.displayHeight || srcInfo.height) : 0;
+
+    const resolved = resolveGeometryChoice(aspect, suggestion);
+    if (resolved) {
+      notes.push(`Output ${resolved.width} × ${resolved.height}.`);
+      if (aspect) {
+        const actual = resolved.width / resolved.height;
+        if (Math.abs(actual - aspect.ratio) > 0.02) {
+          // Never silently stretch: say what will happen instead.
+          notes.push(
+            `That size is ${formatRatio(actual)}, not ${formatRatio(aspect.ratio)} — ` +
+            'the framing setting decides whether the difference is cropped or letterboxed.'
+          );
+        }
+      }
+      if (srcW && srcH) {
+        const srcRatio = srcW / srcH;
+        const outRatio = resolved.width / resolved.height;
+        if (Math.abs(srcRatio - outRatio) > 0.02) {
+          notes.push(`Source is ${formatRatio(srcRatio)}; reframing applies.`);
+        }
+      }
+    } else if (srcW && srcH) {
+      notes.push(`Output stays at the source shape, ${srcW} × ${srcH}.`);
+    }
+    el.createGeometryNote.textContent = notes.join(' ');
+
+    // Framing only means something when the shapes differ.
+    const reshapes = !!aspect;
+    el.createFramingRow.hidden = !reshapes;
+    el.createFramingHelp.hidden = !reshapes;
+  }
+
+  /** The concrete output size the panel currently describes, or null. */
+  function resolveGeometryChoice(aspect, suggestion) {
+    const value = el.createRes.value;
+    if (value === 'custom') {
+      const w = Number(el.createResW.value);
+      const h = Number(el.createResH.value);
+      if (!(w > 0) || !(h > 0)) return null;
+      return { width: evenDim(w), height: evenDim(h) };
+    }
+    if (/^\d+x\d+$/.test(value)) {
+      const [w, h] = value.split('x').map(Number);
+      return { width: w, height: h };
+    }
+    if (value === 'auto') return suggestion || null;
+    return null;   // 'source'
+  }
+
+  function evenDim(v) {
+    const n = Math.max(16, Math.round(Number(v) || 0));
+    return n % 2 === 0 ? n : n + 1;
+  }
+
+  function formatRatio(r) {
+    const known = [[16 / 9, '16:9'], [9 / 16, '9:16'], [4 / 5, '4:5'], [1, '1:1'],
+      [21 / 9, '21:9'], [2.39, '2.39:1'], [4 / 3, '4:3'], [3 / 2, '3:2']];
+    for (const [value, label] of known) {
+      if (Math.abs(r - value) < 0.02) return label;
+    }
+    return `${r.toFixed(2)}:1`;
+  }
+
   /** Panel state -> recipe overrides. */
   function buildRecipeOverrides(outputPath) {
     const platformId = el.createPlatform.value;
@@ -1753,28 +2191,33 @@
       }
     };
 
-    // Resolution
+    // Aspect ratio and resolution, as two separate answers.
+    const aspect = currentAspect();
+    const suggestion = suggestedResolutionFor(aspect);
+    const size = resolveGeometryChoice(aspect, suggestion);
     const resValue = el.createRes.value;
-    if (resValue === 'source') {
+
+    if (!size) {
       overrides.reconstruction = { enabled: false, targetResolution: { mode: 'source' } };
-    } else if (resValue === 'platform' && platform && platform.width) {
+    } else {
       overrides.reconstruction = {
         enabled: true,
         mode: 'classical',
-        targetResolution: { mode: 'custom', width: platform.width, height: platform.height }
-      };
-    } else if (/^\d+x\d+$/.test(resValue)) {
-      const [w, h] = resValue.split('x').map(Number);
-      overrides.reconstruction = {
-        enabled: true,
-        mode: 'classical',
-        targetResolution: { mode: 'custom', width: w, height: h }
+        targetResolution: { mode: 'custom', width: size.width, height: size.height }
       };
     }
 
-    // Canvas / framing
-    if (platform && platform.canvas && platform.canvas !== 'source') {
-      overrides.framing = { ...framingOverride(el.createFraming.value), canvas: platform.canvas, width: platform.width, height: platform.height };
+    // Framing owns the canvas. The aspect control sets its shape; the platform
+    // only seeded that shape when it was chosen.
+    if (aspect) {
+      overrides.framing = {
+        ...framingOverride(el.createFraming.value),
+        canvas: aspect.id,
+        aspectW: aspect.id === 'custom' ? aspect.w : null,
+        aspectH: aspect.id === 'custom' ? aspect.h : null,
+        width: size ? size.width : null,
+        height: size ? size.height : null
+      };
     } else {
       overrides.framing = { enabled: false, canvas: 'source' };
     }
@@ -1805,6 +2248,7 @@
         aiScale: scale,
         model: el.createAiModel.value
       };
+      overrides.reconstruction.aiQuality = el.createAiQuality.value;
       // "Same as source" plus AI upscale means the AI scale decides the size.
       if (resValue === 'source' && ai !== 'restore') {
         overrides.reconstruction.targetResolution = { mode: 'source' };
@@ -1824,8 +2268,9 @@
   async function sendToCreate() {
     if (!state.media) return toast('Open a video first.', 'warn');
     document.querySelector('.tab[data-tab="create"]').click();
-    refreshCreateSource();
-    if (!state.analysis) await analyseSource();
+    // Copies the descriptor across; it does not make the two share one.
+    await setCreateSource(snapshotSource(state.media, state.analysis));
+    if (!state.createAnalysis) await analyseSource();
     toast('Ready to finish this video. Auto can suggest settings.', 'ok', 5000);
   }
 
@@ -1834,18 +2279,19 @@
    * Shared by "render" and "save as preset" so the two can never disagree.
    */
   async function buildCurrentRecipe(outputPath) {
-    if (!state.media) {
-      toast('Open a video first.', 'warn');
+    const src = state.createSource;
+    if (!src) {
+      toast('Choose a Create source first.', 'warn');
       return null;
     }
     const overrides = buildRecipeOverrides(outputPath || 'preset.mp4');
-    overrides.source = state.media.kind === 'local'
-      ? { type: 'local', path: state.media.source, title: state.media.title }
-      : { type: 'remote', webpageUrl: state.media.source, title: state.media.title };
+    overrides.source = src.kind === 'local'
+      ? { type: 'local', path: src.source, title: src.title }
+      : { type: 'remote', webpageUrl: src.webpageUrl || src.source, title: src.title };
 
     const built = el.createUseLook.checked
-      ? await api.recipe.fromPreview(state.params, state.analysis, overrides)
-      : await api.recipe.default(state.analysis, overrides);
+      ? await api.recipe.fromPreview(state.params, state.createAnalysis, overrides)
+      : await api.recipe.default(state.createAnalysis, overrides);
     if (!built.ok) {
       reportFailure(built, 'The recipe could not be built.');
       return null;
@@ -1854,10 +2300,21 @@
   }
 
   async function startCreate() {
-    if (!state.media) return toast('Open a video first.', 'warn');
-    if (state.media.isLive) return toast('Live streams cannot be rendered to a file.', 'warn');
+    // Everything this render needs is captured *now*, before the first await.
+    // The panel stays editable while the dialog is open and while the job
+    // runs; a job that read `state` later would follow those edits, which is
+    // how changing the Create source could re-aim a render already underway.
+    const src = state.createSource;
+    if (!src) return toast('Choose a Create source first.', 'warn');
+    if (src.isLive) return toast('Live streams cannot be rendered to a file.', 'warn');
+    const snapshot = {
+      source: src,
+      analysis: state.createAnalysis,
+      params: state.params ? { ...state.params } : null,
+      useLook: el.createUseLook.checked
+    };
 
-    const base = (state.media.title || 'visionance')
+    const base = (snapshot.source.title || 'visionance')
       .replace(/\.[a-z0-9]{2,4}$/i, '')
       .replace(/[^\w\s.-]+/g, '')
       .trim()
@@ -1866,22 +2323,25 @@
     const container = (platform && platform.container) || 'mp4';
     const suffix = platform && platform.id !== 'custom' ? ` (${platform.id})` : ' (visionance)';
 
+    const overrides = buildRecipeOverrides('placeholder.' + container);
+
     const dest = await api.dialog.saveVideo(`${base}${suffix}.${container}`, container);
     if (!dest.ok) return;
 
-    const overrides = buildRecipeOverrides(dest.file);
+    overrides.output.path = dest.file;
+    overrides.output.container = (dest.file.split('.').pop() || container).toLowerCase();
     overrides.name = `${base}${suffix}`;
-    overrides.source = state.media.kind === 'local'
-      ? { type: 'local', path: state.media.source, title: state.media.title }
+    overrides.source = snapshot.source.kind === 'local'
+      ? { type: 'local', path: snapshot.source.source, title: snapshot.source.title }
       // Only the page URL is recorded: the direct stream URL expires, so the
       // job re-resolves it when it actually runs.
-      : { type: 'remote', webpageUrl: state.media.source, title: state.media.title };
+      : { type: 'remote', webpageUrl: snapshot.source.webpageUrl || snapshot.source.source, title: snapshot.source.title };
 
     // "Apply the look" turns the preview parameters into a starting recipe.
     // The two engines are different; this is intent, not a pixel guarantee.
-    const built = el.createUseLook.checked
-      ? await api.recipe.fromPreview(state.params, state.analysis, overrides)
-      : await api.recipe.default(state.analysis, overrides);
+    const built = snapshot.useLook
+      ? await api.recipe.fromPreview(snapshot.params, snapshot.analysis, overrides)
+      : await api.recipe.default(snapshot.analysis, overrides);
     if (!built.ok) return reportFailure(built, 'The recipe could not be built.');
 
     const check = await api.recipe.sanitize(built.recipe);
@@ -1900,11 +2360,15 @@
 
     const res = await api.jobs.create({
       recipe: check.ok ? check.recipe : built.recipe,
-      analysis: state.analysis,
+      analysis: snapshot.analysis,
       source: {
-        webpageUrl: state.media.kind === 'stream' ? state.media.source : null,
-        headerToken: state.media.streamToken || null,
-        title: state.media.title
+        webpageUrl: snapshot.source.kind === 'stream'
+          ? (snapshot.source.webpageUrl || snapshot.source.source) : null,
+        // Deliberately no stream token. A render that outlives the session it
+        // was started from must re-resolve, not hold a handle to the Watch
+        // tab's expiring one.
+        headerToken: null,
+        title: snapshot.source.title
       }
     });
     if (!res.ok) return reportFailure(res, 'The render could not be queued.');
@@ -1985,7 +2449,21 @@
     left.textContent = `${stageLabel}${Math.round((job.progress || 0) * 100)}%`;
     const right = document.createElement('span');
     if (job.status === 'running') {
-      right.textContent = `${job.speed ? job.speed.toFixed(2) + '×' : '—'}${job.eta ? ` · ${fmtTime(job.eta)} left` : ''}`;
+      // A neural job has no ffmpeg `speed`; it has a measured frame rate. Show
+      // whichever the job actually produced, and show nothing at all while the
+      // estimate is still warming up rather than a number that will be wrong.
+      const parts = [];
+      const rate = job.neuralRate;
+      if (rate && !rate.warming && rate.framesPerSecond > 0) {
+        parts.push(`${rate.framesPerSecond.toFixed(2)} fps`);
+        parts.push(`${rate.framesDone}/${rate.framesTotal} frames`);
+      } else if (rate && rate.warming) {
+        parts.push('measuring rate…');
+      } else if (job.speed) {
+        parts.push(`${job.speed.toFixed(2)}×`);
+      }
+      if (job.eta) parts.push(`~${fmtTime(job.eta)} left`);
+      right.textContent = parts.join(' · ');
     } else if (job.status === 'completed' && job.output && job.output.sizeBytes) {
       right.textContent = fmtBytes(job.output.sizeBytes);
     } else {
@@ -1993,6 +2471,19 @@
     }
     meta.append(left, right);
     node.append(head, bar, meta);
+
+    // What this job costs, from the plan that actually ran.
+    if (job.cost && !['completed', 'cancelled'].includes(job.status)) {
+      const cost = document.createElement('div');
+      cost.className = `job-cost ${job.cost.class}`;
+      const badge = document.createElement('span');
+      badge.className = 'cost-class ' + job.cost.class;
+      badge.textContent = job.cost.label;
+      const detail = document.createElement('span');
+      detail.textContent = job.cost.reasons.join(' · ');
+      cost.append(badge, detail);
+      node.appendChild(cost);
+    }
 
     if (job.plan && job.plan.description) {
       const plan = document.createElement('div');
@@ -2005,14 +2496,28 @@
 
     // What Smart Reframe actually did, named by the backend that did it. The
     // panel never says "AI framing" when what ran was saliency tracking.
+    // One reconciled account of what the tracker did. Every number here comes
+    // from the same summary, so the card can no longer report a success metric
+    // beside a failure warning.
     if (job.reframe) {
       const rf = document.createElement('div');
-      rf.className = 'job-plan';
-      const pct = Math.round((job.reframe.confidence || 0) * 100);
-      rf.textContent = job.reframe.static
-        ? `${job.reframe.backendLabel}: subject was static, so the crop is fixed (${pct}% confidence)`
-        : `${job.reframe.backendLabel}: crop follows the subject across ${job.reframe.samples} positions ` +
-          `(${pct}% confidence${job.reframe.cuts ? `, ${job.reframe.cuts} cuts` : ''})`;
+      rf.className = `job-reframe ${job.reframe.outcome || ''}`;
+      const title = document.createElement('div');
+      title.className = 'job-reframe-head';
+      title.textContent = `Smart Reframe · ${job.reframe.backendLabel}`;
+      const line = document.createElement('div');
+      // A job persisted by an earlier build has the old counters and no
+      // headline. Describe it from what it does have rather than printing
+      // "undefined" at someone.
+      line.textContent = job.reframe.headline ||
+        `Tracked ${job.reframe.tracked ?? '—'} of ${job.reframe.samples ?? '—'} samples`;
+      rf.append(title, line);
+      if (job.reframe.detail && job.reframe.detail.length) {
+        const detail = document.createElement('div');
+        detail.className = 'job-reframe-detail';
+        detail.textContent = job.reframe.detail.join(' · ');
+        rf.appendChild(detail);
+      }
       node.appendChild(rf);
     }
 
@@ -2331,7 +2836,11 @@
     el.createQuality.addEventListener('input', () => {
       el.createQualityVal.textContent = el.createQuality.value;
     });
-    el.createPlatform.addEventListener('change', syncPlatformUi);
+    el.createPlatform.addEventListener('change', () => {
+      syncPlatformUi({ seedGeometry: true });
+      markRecipeModified();
+      schedulePreview();
+    });
     el.createAi.addEventListener('change', syncAiUi);
     el.createAiModel.addEventListener('change', syncAiUi);
     el.createInterp.addEventListener('change', syncAiUi);
@@ -2362,9 +2871,34 @@
     el.analyseBtn.addEventListener('click', analyseSource);
     el.autoBuildBtn.addEventListener('click', runAuto);
     el.createPreset.addEventListener('change', () => applyCreatorPreset(el.createPreset.value));
-    for (const control of [el.createAi, el.createAiModel, el.createInterp, el.createRes,
-      el.createFps, el.createFraming, el.createAudio, el.createLoudness, el.createQuality]) {
+
+    // Create's own source actions. None of them touch the video element.
+    el.createOpenFileBtn.addEventListener('click', createOpenFile);
+    el.createUseWatchBtn.addEventListener('click', createUseWatchSource);
+    el.createUrlBtn.addEventListener('click', createOpenUrl);
+    el.createUrlInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') createOpenUrl();
+    });
+
+    for (const control of [el.createAi, el.createAiModel, el.createAiQuality, el.createInterp,
+      el.createRes, el.createAspect, el.createFps, el.createFraming, el.createAudio,
+      el.createLoudness, el.createQuality]) {
       control.addEventListener('change', markRecipeModified);
+    }
+    // Geometry controls reflect into each other, then re-price the job.
+    for (const control of [el.createAspect, el.createRes]) {
+      control.addEventListener('change', () => { syncGeometryUi(); schedulePreview(); });
+    }
+    for (const input of [el.createAspectW, el.createAspectH, el.createResW, el.createResH]) {
+      input.addEventListener('input', () => {
+        markRecipeModified();
+        syncGeometryUi();
+        schedulePreview();
+      });
+    }
+    for (const control of [el.createAi, el.createAiModel, el.createAiQuality, el.createInterp,
+      el.createFps, el.createFraming]) {
+      control.addEventListener('change', () => { syncAiUi(); schedulePreview(); });
     }
     el.saveRecipeBtn.addEventListener('click', async () => {
       const name = el.recipeName.value.trim();

@@ -127,6 +127,56 @@ function installedModels(engineDir) {
   return out;
 }
 
+/* ------------------------------------------------------------------ *
+ * Inference quality
+ *
+ * Output scale and inference quality are different questions, and conflating
+ * them is what made a ten-second clip take the best part of an hour.
+ *
+ * Measured on the reference machine (GTX 1650 Ti, 8 frames per run):
+ *
+ * ```
+ * 720p source, 2x output (1440p)
+ *   x4plus at x4 on the full frame, Lanczos back down   12.66 s/frame
+ *   x4plus at x4 on a half-size frame, exact 2x          3.61 s/frame   3.5x faster
+ *   animevideov3 native x2                               0.64 s/frame  19.9x faster
+ *
+ * 480p source
+ *   x4plus at x4 on the full frame                        6.07 s/frame
+ *   x4plus at x4 on a half-size frame                     1.96 s/frame  3.1x faster
+ *   animevideov3 native x2 / x4                           0.41 s/frame
+ * ```
+ *
+ * The middle row is the one worth explaining. These networks are trained to
+ * reconstruct from *degraded, low-resolution* input - that is the entire
+ * premise of ESRGAN - so feeding a half-size frame to a 4x model and taking
+ * the result at exactly 2x is a legitimate way to reach 2x, not a shortcut
+ * pretending to be one. It costs a quarter of the inference pixels because
+ * the cost is driven by the input area. It is genuinely lower fidelity than
+ * running the network on every source pixel and resampling down, because half
+ * the source detail never reaches the network - which is precisely why it is
+ * `balanced` and not `quality`.
+ *
+ * There is no native General 2x model to ship. `RealESRGAN_x2plus` exists
+ * upstream as PyTorch weights, but the official ncnn portable release carries
+ * no x2 param/bin for it, and the community conversions have no published
+ * provenance or checksums. Inventing one, or relabelling the anime model as
+ * general, would be worse than the honest fallback below.
+ * ------------------------------------------------------------------ */
+
+const QUALITIES = ['fast', 'balanced', 'quality', 'maximum'];
+
+const QUALITY_LABELS = {
+  fast: 'Fast',
+  balanced: 'Balanced',
+  quality: 'Quality',
+  maximum: 'Maximum'
+};
+
+function normaliseQuality(q) {
+  return QUALITIES.includes(q) ? q : 'balanced';
+}
+
 /**
  * Decide how to run the network for a requested outcome.
  *
@@ -135,10 +185,13 @@ function installedModels(engineDir) {
  *   scale       requested output multiplier (1 for restore, 2 or 4 for upscale)
  *   modelId     'auto' | catalogue id
  *   available   result of installedModels()
- * @returns {{model, inferenceScale, downscaleAfter, reason}|null}
+ *   quality     'fast' | 'balanced' | 'quality' | 'maximum'
+ * @returns {{neural, model, inferenceScale, preScale, downscaleAfter,
+ *            effectiveScale, quality, reason, tradeoff}|null}
  */
-function planInference({ mode = 'upscale', scale = 2, modelId = 'auto', available = [] }) {
+function planInference({ mode = 'upscale', scale = 2, modelId = 'auto', available = [], quality = 'balanced' }) {
   if (!available.length) return null;
+  const q = normaliseQuality(quality);
 
   const byId = (id) => available.find((m) => m.id === id) || null;
   const animation = byId('animation') || byId('animation-art');
@@ -156,41 +209,110 @@ function planInference({ mode = 'upscale', scale = 2, modelId = 'auto', availabl
   if (!model) return null;
 
   const scales = model.availableScales || model.nativeScales;
+  const base = {
+    neural: true, model, preScale: 1, quality: q,
+    qualityLabel: QUALITY_LABELS[q], tradeoff: null
+  };
 
   if (mode === 'restore') {
-    // No 1x weights exist. Use the cheapest native scale and come back down.
-    const inferenceScale = Math.min(...scales);
+    // No 1x weights exist. Use the cheapest native scale and come back down,
+    // except at Maximum where the largest scale reconstructs the most.
+    const inferenceScale = q === 'maximum' ? Math.max(...scales) : Math.min(...scales);
     return {
-      model,
+      ...base,
       inferenceScale,
       downscaleAfter: true,
+      effectiveScale: 1,
       reason: `restore via ${inferenceScale}x inference then Lanczos downscale`
     };
   }
 
-  if (scales.includes(scale)) {
-    return { model, inferenceScale: scale, downscaleAfter: false, reason: `native ${scale}x` };
-  }
-
-  // Requested scale has no weights: go up to the nearest native scale that is
-  // at least as large, then come back down.
+  const hasNative = scales.includes(scale);
   const bigger = scales.filter((s) => s > scale).sort((a, b) => a - b)[0];
-  if (bigger) {
+  const largest = Math.max(...scales);
+
+  // Maximum always reconstructs at the largest native scale and resamples
+  // down, even when a native scale exists - that is what the user asked for.
+  if (q === 'maximum' && largest > scale) {
     return {
-      model,
-      inferenceScale: bigger,
+      ...base,
+      inferenceScale: largest,
       downscaleAfter: true,
-      reason: `${scale}x via ${bigger}x inference then Lanczos downscale (no native ${scale}x weights)`
+      effectiveScale: scale,
+      reason: `${scale}x via ${largest}x inference then Lanczos downscale (maximum reconstruction)`,
+      tradeoff: 'Highest fidelity and by far the slowest: the network runs on every source pixel at its largest scale.'
     };
   }
 
-  const largest = Math.max(...scales);
+  if (hasNative) {
+    return {
+      ...base,
+      inferenceScale: scale,
+      downscaleAfter: false,
+      effectiveScale: scale,
+      reason: `native ${scale}x`
+    };
+  }
+
+  if (!bigger) {
+    return {
+      ...base,
+      inferenceScale: largest,
+      downscaleAfter: largest !== scale,
+      effectiveScale: scale,
+      reason: `${largest}x is the largest available (requested ${scale}x)`
+    };
+  }
+
+  // No native weights at the requested scale. What happens now is the whole
+  // point of the quality setting.
+  if (q === 'fast') {
+    // Refuse to spend 4x-on-every-pixel money for a 2x result. The caller
+    // falls back to classical reconstruction, and is told so plainly.
+    return {
+      ...base,
+      neural: false,
+      inferenceScale: null,
+      downscaleAfter: false,
+      effectiveScale: scale,
+      reason: `no native ${scale}x weights for ${model.name}; Fast uses classical reconstruction instead`,
+      tradeoff: `Fast declines neural ${scale}x here because this model has no native ${scale}x weights, ` +
+        'and running its 4x network on every source pixel costs far more than the result is worth. ' +
+        'Detail is resampled and sharpened rather than reconstructed.'
+    };
+  }
+
+  if (q === 'balanced') {
+    const preScale = scale / bigger;
+    return {
+      ...base,
+      inferenceScale: bigger,
+      preScale,
+      downscaleAfter: false,
+      effectiveScale: scale,
+      reason: `${scale}x via ${bigger}x inference on a ${formatFraction(preScale)}-size frame (no native ${scale}x weights)`,
+      tradeoff: `Balanced reaches ${scale}x by running the ${bigger}x network on a ${formatFraction(preScale)}-size ` +
+        'frame, which costs about a quarter of the inference and measured 3.5x faster. ' +
+        'It reconstructs from less source detail than Quality does.'
+    };
+  }
+
   return {
-    model,
-    inferenceScale: largest,
-    downscaleAfter: largest !== scale,
-    reason: `${largest}x is the largest available (requested ${scale}x)`
+    ...base,
+    inferenceScale: bigger,
+    downscaleAfter: true,
+    effectiveScale: scale,
+    reason: `${scale}x via ${bigger}x inference then Lanczos downscale (no native ${scale}x weights)`,
+    tradeoff: `Quality runs the ${bigger}x network on every source pixel and resamples down. ` +
+      'The most detail the model can use, and the slowest path short of Maximum.'
   };
+}
+
+function formatFraction(v) {
+  if (Math.abs(v - 0.5) < 1e-6) return 'half';
+  if (Math.abs(v - 0.25) < 1e-6) return 'quarter';
+  if (Math.abs(v - 0.75) < 1e-6) return 'three-quarter';
+  return `${Math.round(v * 100)}%`;
 }
 
 /**
@@ -215,6 +337,9 @@ module.exports = {
   ID,
   MODELS,
   LICENSE,
+  QUALITIES,
+  QUALITY_LABELS,
+  normaliseQuality,
   releaseFor,
   installedModels,
   modelFiles,

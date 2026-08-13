@@ -181,6 +181,28 @@ instead of restarting it, and the Play button compares a normalised URL against
 what is loaded: a different address means load it, the same address means
 ordinary play/pause.
 
+### Watch and Create hold different sources
+
+`state.media` is what Watch is playing. `state.createSource` is what Create
+intends to render. They used to be the same object, which meant choosing
+something to render changed what was on screen, and opening something to watch
+silently re-aimed a render that was being set up.
+
+`state.createSource` is a descriptor and its analysis - never a player handle -
+so nothing Create does can touch the video element. `snapshotSource()` copies
+what a job will need and, for a remote source, keeps only the **page URL**: a
+long render must not depend on the Watch tab's stream session, which expires in
+hours and belongs to a different concern. Create resolves a URL only to
+identify and describe it, then releases the token immediately; the job
+re-resolves when it actually runs.
+
+`startCreate()` captures source, analysis, preview params and the "apply the
+look" flag into a local snapshot **before its first `await`**. The destination
+dialog is modal for the user but not for the renderer, and the job then runs for
+minutes; a job that read `state` later would follow every subsequent edit. With
+the snapshot, changing the Create source - or the Watch source - while a render
+is in flight cannot re-aim it. Verified by `verify:switch`.
+
 ### Split-stream audio
 
 A split stream plays through a second `<audio>` element, and both elements are
@@ -363,6 +385,40 @@ is worse than none.
 
 ---
 
+## Output geometry: four separate questions
+
+Target, aspect ratio, resolution and framing are related and not the same
+setting. Before this they were collapsed into two - a platform picker and a
+resolution list - so a 21:9 master was not expressible at all, and the only way
+to get a vertical crop was to claim you were targeting TikTok.
+
+| Control | Owns |
+|---|---|
+| **Target** | *seeds* the other three, then stops |
+| **Aspect ratio** | the output shape: `source`, `16:9`, `9:16`, `4:5`, `1:1`, `21:9`, `2.39:1`, `custom` (`framing.aspectW`/`aspectH`) |
+| **Resolution** | the pixel count: the ratio's suggestion, source, a preset, or custom dimensions |
+| **Framing** | what happens when the source shape and the output shape disagree |
+
+`ASPECTS` carries a `suggested` resolution per ratio. Resolution is
+intent-preserving: while it is on `auto` a ratio change moves it; once the user
+types a size, that size is kept even when it no longer matches the ratio, and
+the mismatch is *stated* - "That size is 2.39:1, not 16:9 - the framing setting
+decides whether the difference is cropped or letterboxed" - rather than
+resolved by stretching.
+
+`"21:9"` is deliberately stored as **64:27**. Every ultrawide panel and every
+standard ultrawide resolution - 2560x1080, 3440x1440 - is 64:27 (2.370:1), not
+21/9 (2.333:1). Using the literal arithmetic would make the ratio disagree with
+the resolution the same control suggests, which is the sort of small lie that
+produces a two-pixel letterbox nobody can explain. A test asserts every ratio
+against its own suggested resolution, which is how this was caught.
+
+Dimensions are evened (`evenDim`) because most encoders refuse odd ones, and
+the user is told when a value was adjusted. Zero, negative, NaN and absurd
+dimensions are clamped in `sanitize()` rather than failing deep inside ffmpeg.
+
+---
+
 ## Smart Reframe
 
 `ai/tracking.js`. One ffmpeg pass decodes the clip to a 32x18 greyscale grid at
@@ -409,6 +465,47 @@ what the Smart Reframe row produces. Changing the control by hand marks an Auto
 result as edited, and the Queue card reports the backend that actually ran and
 the confidence it reached - never "AI framing".
 
+### One account of what the tracker did
+
+The queue could report `crop follows the subject across 40 positions (100%
+confidence, 4 cuts)` directly above `the subject could not be located
+reliably`. Both were true *of their own numbers*, because three places were
+describing the same run in different vocabularies:
+
+- the queue printed the mean confidence of the **raw detector over every
+  sample**, which measures how concentrated the saliency energy was, not
+  whether anything was tracked
+- `tracking.js` warned from `fallbacks`, a different quantity with its own
+  threshold
+- `filters.js` announced "the crop follows the subject" purely because the
+  compiled crop expression was not a constant - a filter builder cannot know
+  whether tracking succeeded, and should never have claimed to
+
+`summariseTracking()` is now the single source of truth:
+
+| field | meaning |
+|---|---|
+| `samples` | frames sampled, at 4 fps |
+| `tracked` | samples where a confident detection set or moved the crop |
+| `held` | samples that reused the last good position |
+| `centred` | samples with no position to reuse, so the crop sat centred |
+| `coverage` | `tracked / samples` |
+| `confidence` | mean confidence **of the tracked samples only** |
+| `scenes` | `cuts + 1` |
+| `outcome` | `tracked` (>=60% coverage), `partial` (>=25%), `centred` |
+
+`tracked + held + centred === samples`, always. `held` and `centred` are nested
+in the raw counters (`fallbacks` is a subset of `holds`) and are un-nested
+exactly once, here, instead of being reported side by side and double-counting
+the same frames. A cut into a shot that cannot be read now counts as a centre
+fallback rather than incrementing neither counter, which is what stopped the
+totals adding up in the first place.
+
+The headline, the detail line and the warning all derive from `outcome`, so a
+failure message cannot appear beside a success metric - and a failed run quotes
+no confidence at all, because a confidence averaged over zero tracked samples
+is not a number. `filters.js` now describes geometry only.
+
 ---
 
 ## Neural pipeline
@@ -440,9 +537,94 @@ The fused graph is split in two around the network (`buildPreNeuralFilters` /
 - **before** - tone map, deinterlace, crop, denoise/deblock. Cleanup belongs
   here: feeding compression artefacts into a super-resolution model teaches it
   to reconstruct the artefacts.
+
+  These are applied in the **decode** pass, chained after the `fps=` pin so the
+  frame grid is decided before anything spatial touches the picture.
+  `extractFrames()` previously took no `filters` argument at all while
+  `processChunk` passed one, so the entire pre-neural chain was silently
+  discarded and the network was fed raw decoded frames - exactly the failure
+  this split exists to prevent. Found by measuring: a Balanced job whose plan
+  said `preScale: 0.5` was writing full-size decoded frames to disk.
 - **after** - scale to the final size, canvas/reframe, sharpen, grade, deband,
   grain, pixel format. Grading belongs here because the network changes the
   image it would be grading.
+
+### Inference quality is not output scale
+
+Two separate axes, and conflating them made a ten-second clip take the best part
+of an hour. `realesrgan-x4plus` has 4x weights and nothing else, so *how* a 2x
+result is reached is a choice. Measured on the reference machine (GTX 1650 Ti,
+8 frames per run):
+
+```
+720p source, 2x output
+  x4plus at x4 on the full frame, Lanczos down    12.66 s/frame
+  x4plus at x4 on a half-size frame, exact 2x      3.61 s/frame   3.5x faster
+  animevideov3 native x2                           0.64 s/frame  19.9x faster
+
+480p source
+  x4plus at x4 on the full frame                    6.07 s/frame
+  x4plus at x4 on a half-size frame                 1.96 s/frame  3.1x faster
+  animevideov3 native x2 / x4                       0.41 s/frame
+```
+
+`planInference()` therefore takes a `quality` and returns `preScale` alongside
+`inferenceScale`, plus `neural: false` where a mode declines to run a network
+at all:
+
+| | native weights exist | they do not (General 2x) |
+|---|---|---|
+| `fast` | native | **`neural: false`** - the caller uses the classical path |
+| `balanced` | native | `preScale: 0.5`, `inferenceScale: 4`, exact 2x |
+| `quality` | native | `preScale: 1`, `inferenceScale: 4`, downscale after |
+| `maximum` | largest native + downscale | largest native + downscale |
+
+The `balanced` row is a real technique rather than a shortcut wearing a nicer
+name: ESRGAN-family networks are trained to reconstruct from degraded
+low-resolution input, and cost follows *input* area, so a half-size frame into
+a 4x model costs a quarter of the inference and lands on 2x with no resampling
+at all. It is genuinely lower fidelity than `quality` - half the source detail
+never reaches the network - and both `tradeoff` strings say so in the panel.
+
+The pre-scale is applied in the **decode** filter chain in `stages/neural.js`,
+not after decoding: the point is that the network never sees the full-size
+frame.
+
+**There is no native General 2x model to ship.** `RealESRGAN_x2plus` exists
+upstream as PyTorch weights; the official ncnn portable release carries no x2
+param/bin for it, and community conversions have no published provenance or
+checksums. Native 2x exists only for `realesr-animevideov3`, which every
+quality mode uses when the Animation model is selected because it is both real
+and cheap. Relabelling the anime model as general-purpose, or shipping an
+unverified conversion, would be worse than the honest fallback.
+
+### Cost, and when an estimate is allowed to exist
+
+`pipeline.estimatePlanCost()` classifies a job from the **resolved** plan:
+after the engine planner has chosen a model, decided the pre-scale, and
+possibly declined the neural pass entirely. The previous estimate ran on the
+Auto recipe before any of that was known, which is how a job about to execute
+x4 inference was labelled `fast` in the queue.
+
+Cost follows network *input* megapixels, using measured per-model rates
+(`SECONDS_PER_INPUT_MPX`). Those constants are a classifier's, not a promise -
+they put a job in the right bucket on the hardware Visionance targets.
+
+`UPSCALE.mode` and `INTERPOLATE.mode` take `ctx.neuralUpscale` /
+`ctx.neuralInterpolate` from that same resolution, so a declined neural pass
+becomes a genuinely `fused` stage rather than a `pass` with a six-weight
+progress bar over work that never runs - and the job does not get dragged onto
+the chunked neural path for nothing.
+
+Once frames exist, `updateNeuralRate()` replaces the class with a measured
+figure: frames completed against wall clock, exponentially smoothed, counted
+across chunks *and* within the chunk in flight so a short single-chunk clip
+still produces one. Nothing is reported until 12 frames and 8 seconds are
+behind it, because the first frames of a neural job include model load, Vulkan
+warm-up and the tile search. Until then the queue says `measuring rate…`.
+
+`estimateEta()` prefers that rate and falls back to ffmpeg's own `speed` for
+fused encodes, which genuinely have one.
 
 ### Scale is not resolution
 
@@ -756,8 +938,9 @@ unless `VISIONANCE_LOG=debug`.
 | Command | What it proves |
 |---|---|
 | `npm run verify:core` | Recipe schema, chunk planning, workspace path safety, error classification, yt-dlp policy and argument construction, ffmpeg builders. No network, no binaries. |
+| `npm run verify:create` | Aspect-ratio geometry across every offered ratio plus custom ones, dimension validation (odd, zero, NaN, absurd), platform-seeds-but-does-not-own, resolved-plan cost classification including "an x4 job is never fast" and the pre-scale proportion, Auto's inference-quality decisions, and Smart Reframe telemetry consistency across the whole range of outcomes. No network, no binaries, no GPU. |
 | `npm run verify:watch` | Stream-height policy against real viewport/display combinations and every quality mode, Watch codec ranking against a real YouTube format list, the ranged proxy (chunking, exact byte ranges, backpressure, cancellation, retry, header hygiene, accounting), presentation-rate maths at eight source frame rates including coalesced callbacks and 3:2 pulldown, and the framing control mapping in both directions. No network, no binaries, no GPU. |
-| `npm run verify:switch` | Boots the app and drives real source changes through the real controls - fresh→local, local→local, local→URL, URL→local, URL→URL, while playing and while paused, with enhancement on and off - plus both directions of the stale-resolution race against a deliberately slow resolver, Play-button semantics, URL normalisation, session release, and a Smart Reframe render started from the Create panel and ffprobed for 9:16 geometry, audio and duration. |
+| `npm run verify:switch` | Boots the app and drives real source changes through the real controls - fresh→local, local→local, local→URL, URL→local, URL→URL, while playing and while paused, with enhancement on and off - plus both directions of the stale-resolution race against a deliberately slow resolver, Play-button semantics, URL normalisation, session release, Watch/Create source independence, the job source snapshot surviving both sources changing under it, background rendering, the aspect-ratio and cost-preview controls, and a Smart Reframe render started from the Create panel and ffprobed for 9:16 geometry, audio and duration. |
 | `npm run verify:gl` | Every shader compiles and links in a real GL context; each preset renders and differs measurably from a neutral resample. |
 | `npm run verify:export` | Real ffmpeg renders through the real JobManager: geometry, platform canvases, fps conversion, audio, chunk-and-join, cancellation, verification failure, persistence and crash recovery. |
 | `npm run verify:ai` | Interpolation timing across nine real frame rates, cut handling, engine lifecycle, OOM/Vulkan interpretation, GPU ranking, disk estimation - then **real** Real-ESRGAN and RIFE inference on tiny clips, including the RED/BLUE cut fixture. Prints whether the real half ran. |

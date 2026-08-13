@@ -264,6 +264,37 @@ function buildAutoRecipe({
     explanations.push('Maximum intensity: neural scale kept at 2x, which already exceeds the target.');
   }
 
+  /* ---------------- how much inference to spend ----------------
+   *
+   * Scale and inference quality are separate decisions, and Auto has to make
+   * the second one too. Left at the old default, a 2x request on general
+   * footage ran the 4x network over every source pixel and resampled down -
+   * measured at 12.66 s per 720p frame on the reference GPU, which is roughly
+   * 53 minutes for a ten-second clip. That is not a default; that is a
+   * surprise.
+   */
+  if (reconstruction.mode === 'neural') {
+    reconstruction.aiQuality = neuralQualityFor({
+      intensity, srcH, targetH, quality, profile
+    });
+    const q = reconstruction.aiQuality;
+    if (q === 'maximum') {
+      explanations.push(
+        'Maximum intensity: neural reconstruction runs at the model\'s largest scale over every ' +
+        'source pixel. This is the slowest path and is being chosen deliberately.'
+      );
+    } else if (q === 'quality') {
+      explanations.push('Damaged source: inference runs on full-size frames for the most detail the model can use.');
+    } else if (q === 'balanced') {
+      explanations.push(
+        'Inference quality set to Balanced — the network reaches the requested scale without ' +
+        'processing four times the pixels it needs to.'
+      );
+    } else {
+      explanations.push('Inference quality set to Fast to keep the render proportionate to the source.');
+    }
+  }
+
   /* ---------------- motion ---------------- */
   const motion = {
     enabled: false,
@@ -447,6 +478,38 @@ function buildColor(policy, factor, analysis, explanations, warnings) {
  * Cost class, not an ETA. An ETA before any frames have been processed would be
  * a guess, and on a 4 GB laptop GPU a wrong one is badly misleading.
  */
+/**
+ * How much inference should Auto spend?
+ *
+ * The rule is proportionality: the worse the source and the further it has to
+ * travel, the more reconstruction is worth paying for. Nothing here reaches
+ * for the expensive path on a source that does not need it, and only an
+ * explicit `maximum` intensity gets the full-pixel 4x route.
+ *
+ * @returns {'fast'|'balanced'|'quality'|'maximum'}
+ */
+function neuralQualityFor({ intensity, srcH = 0, targetH = 0, quality = {}, profile = 'auto' }) {
+  // The user asked for everything, in as many words.
+  if (intensity === 'maximum') return 'maximum';
+
+  // Animation has genuine native 2x weights, so Balanced there is already a
+  // real native inference - there is nothing cheaper worth having.
+  if (profile === 'animation') return intensity === 'light' ? 'balanced' : 'quality';
+
+  const climb = srcH > 0 && targetH > 0 ? targetH / srcH : 1;
+  const poor = quality.level === 'poor';
+
+  // A badly damaged source climbing a long way is the case full-pixel
+  // inference was designed for: there is real damage to repair and little
+  // detail to lose.
+  if (poor && climb >= 2 && intensity === 'strong') return 'quality';
+
+  if (intensity === 'light') return 'fast';
+
+  // Everything else: reach the scale without paying four times over.
+  return 'balanced';
+}
+
 function estimateCost({ recipe, geometry, analysis }) {
   const duration = (analysis.derived && analysis.derived.durationSeconds) || 0;
   const outPixels = (geometry.width || 1920) * (geometry.height || 1080);
@@ -457,14 +520,32 @@ function estimateCost({ recipe, geometry, analysis }) {
   score += (outPixels / 2e6) * (frames / 1000);
   if (recipe.reconstruction.mode === 'neural') {
     score *= recipe.reconstruction.aiScale >= 4 ? 22 : 10;
+    // Inference quality moves the cost by more than the scale does. This is
+    // still only Auto's preview figure - the authoritative class comes from
+    // `pipeline.estimatePlanCost()` once the model and pre-scale are known.
+    const q = recipe.reconstruction.aiQuality || 'balanced';
+    if (q === 'fast') score *= 0.15;
+    else if (q === 'balanced') score *= 0.35;
+    else if (q === 'maximum') score *= 1.4;
   }
   if (recipe.motion.interpolation === 'ai') score *= 3;
   if (recipe.framing.tracking === 'auto') score *= 1.3;
 
-  if (score < 8) return 'fast';
-  if (score < 60) return 'moderate';
-  if (score < 400) return 'heavy';
-  return 'very-heavy';
+  let cost;
+  if (score < 8) cost = 'fast';
+  else if (score < 60) cost = 'moderate';
+  else if (score < 400) cost = 'heavy';
+  else cost = 'very-heavy';
+
+  // A job that runs a network is never `fast`, whatever the arithmetic says.
+  // The cheapest measured neural path on the reference GPU still costs about
+  // 0.6 s per frame, so even a short clip is minutes rather than seconds, and
+  // "fast" beside a running Real-ESRGAN pass is the label that made the queue
+  // untrustworthy in the first place.
+  const runsNetwork = recipe.reconstruction.mode === 'neural' ||
+    recipe.motion.interpolation === 'ai';
+  if (runsNetwork && cost === 'fast') cost = 'moderate';
+  return cost;
 }
 
 function clamp(v, lo, hi) {
@@ -476,6 +557,7 @@ module.exports = {
   inferProfile,
   assessQuality,
   estimateCost,
+  neuralQualityFor,
   isCinematicRate,
   PROFILES,
   INTENSITIES,

@@ -211,6 +211,19 @@
               <strong id="createSourceTitle">No source selected</strong>
               <button class="link-btn" id="analyseBtn">Analyse</button>
             </div>
+
+            <!-- Create picks its own source. Watch keeps playing whatever it
+                 was playing; the two never fight over one video element. -->
+            <div class="create-source-actions">
+              <button class="btn btn-ghost" id="createOpenFileBtn">Choose video…</button>
+              <button class="btn btn-ghost" id="createUseWatchBtn">Use current Watch video</button>
+            </div>
+            <div class="create-source-url">
+              <input id="createUrlInput" type="text" spellcheck="false"
+                     placeholder="…or paste a video URL" aria-label="Create source URL">
+              <button class="btn btn-ghost" id="createUrlBtn">Load</button>
+            </div>
+
             <div class="analysis-grid" id="analysisGrid"></div>
             <p class="field-help" id="analysisNote"></p>
           </div>
@@ -247,17 +260,42 @@
             <select id="createPlatform" class="select"></select>
           </div>
 
+          <!-- Target suggests geometry; aspect ratio and resolution set it.
+               Three separate questions, three separate controls. -->
+          <div class="field-row">
+            <label for="createAspect">Aspect ratio</label>
+            <select id="createAspect" class="select"></select>
+          </div>
+          <div class="field-row" id="createAspectCustomRow" hidden>
+            <label for="createAspectW">Ratio</label>
+            <div class="dim-pair">
+              <input id="createAspectW" class="input" type="number" min="1" max="1000" value="16" aria-label="Aspect width">
+              <span>:</span>
+              <input id="createAspectH" class="input" type="number" min="1" max="1000" value="9" aria-label="Aspect height">
+            </div>
+          </div>
+
           <div class="field-row">
             <label for="createRes">Output resolution</label>
             <select id="createRes" class="select">
+              <option value="auto">Suggested for this ratio</option>
               <option value="source">Same as source</option>
-              <option value="platform">From target</option>
               <option value="1280x720">1280 × 720</option>
               <option value="1920x1080">1920 × 1080</option>
               <option value="2560x1440">2560 × 1440</option>
               <option value="3840x2160">3840 × 2160 (4K)</option>
+              <option value="custom">Custom…</option>
             </select>
           </div>
+          <div class="field-row" id="createResCustomRow" hidden>
+            <label for="createResW">Dimensions</label>
+            <div class="dim-pair">
+              <input id="createResW" class="input" type="number" min="16" max="16384" step="2" value="1920" aria-label="Output width">
+              <span>×</span>
+              <input id="createResH" class="input" type="number" min="16" max="16384" step="2" value="1080" aria-label="Output height">
+            </div>
+          </div>
+          <p class="field-help" id="createGeometryNote"></p>
 
           <div class="field-row" id="createFramingRow">
             <label for="createFraming">Reframing</label>
@@ -285,6 +323,17 @@
                 <option value="4">Upscale 4×</option>
               </select>
             </div>
+
+            <div class="field-row" id="createAiQualityRow" hidden>
+              <label for="createAiQuality">Inference quality</label>
+              <select id="createAiQuality" class="select">
+                <option value="fast">Fast — cheapest path that reaches the scale</option>
+                <option value="balanced" selected>Balanced — recommended</option>
+                <option value="quality">Quality — full-size inference</option>
+                <option value="maximum">Maximum — largest scale, slowest</option>
+              </select>
+            </div>
+            <p class="field-help" id="createAiQualityNote" hidden></p>
 
             <div class="field-row" id="createAiModelRow" hidden>
               <label for="createAiModel">Model</label>
@@ -387,6 +436,13 @@
             <input type="checkbox" id="createChunked" class="switch">
           </div>
           <p class="field-help">Renders in segments and joins them losslessly. Slightly larger files, but the job can be paused and resumed at a segment boundary.</p>
+
+          <!-- What this render will cost, from the plan that will actually
+               run - not from the recipe before the engine resolved it. -->
+          <div class="cost-preview" id="createCostPreview" hidden>
+            <span class="cost-class" id="createCostClass">—</span>
+            <span class="cost-detail" id="createCostDetail"></span>
+          </div>
 
           <button class="btn btn-accent full" id="startCreateBtn">Choose destination &amp; render</button>
           <div class="recipe-warnings" id="recipeWarnings"></div>

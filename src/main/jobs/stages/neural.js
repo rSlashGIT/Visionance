@@ -80,6 +80,7 @@ async function planNeural({ recipe, analysis, geometry, engines }) {
       mode: recipe.reconstruction.aiMode === 'restore' ? 'restore' : 'upscale',
       scale: recipe.reconstruction.aiScale || 2,
       modelId: recipe.reconstruction.model || 'auto',
+      quality: recipe.reconstruction.aiQuality || 'balanced',
       available: status.models
     });
     if (!inference) {
@@ -88,16 +89,31 @@ async function planNeural({ recipe, analysis, geometry, engines }) {
         suggestedAction: 'Settings → AI engines → Reinstall Real-ESRGAN.'
       });
     }
-    upscale = {
-      engineId: realesrgan.ID,
-      status,
-      model: inference.model,
-      inferenceScale: inference.inferenceScale,
-      downscaleAfter: inference.downscaleAfter,
-      gpuId: resolveGpu(recipe, status),
-      reason: inference.reason
-    };
-    notes.push(`Neural upscale: ${inference.model.name} (${inference.reason}).`);
+    if (!inference.neural) {
+      // Fast declined to run a 4x network to produce a 2x result. That is a
+      // real quality decision, not a silent substitution: the job says which
+      // path it took and why, and the classical scaler in the fused graph
+      // handles the resize.
+      notes.push(`Neural upscale skipped: ${inference.reason}.`);
+      notes.push(inference.tradeoff);
+    } else {
+      upscale = {
+        engineId: realesrgan.ID,
+        status,
+        model: inference.model,
+        inferenceScale: inference.inferenceScale,
+        preScale: inference.preScale || 1,
+        downscaleAfter: inference.downscaleAfter,
+        effectiveScale: inference.effectiveScale,
+        quality: inference.quality,
+        qualityLabel: inference.qualityLabel,
+        gpuId: resolveGpu(recipe, status),
+        reason: inference.reason,
+        tradeoff: inference.tradeoff
+      };
+      notes.push(`Neural upscale: ${inference.model.name} (${inference.reason}).`);
+      if (inference.tradeoff) notes.push(inference.tradeoff);
+    }
   }
 
   if (wantsInterpolate) {
@@ -290,6 +306,16 @@ async function processChunk({ ctx, chunk, aiPlan, dirs, report }) {
 
   /* ---- 1. decode ---- */
   const pre = buildPreNeuralFilters(recipe, analysis, { availableFilters: ctx.availableFilters });
+  const preFilters = [...pre.filters];
+
+  // Balanced reaches a scale the model has no native weights for by running the
+  // larger network on a smaller frame. The downscale belongs here, in the
+  // decode pass, so the network never sees the full-size frame at all - that
+  // is where the saving comes from.
+  const preScale = (aiPlan.upscale && aiPlan.upscale.preScale) || 1;
+  if (preScale > 0 && preScale < 1) {
+    preFilters.push(`scale=iw*${preScale}:ih*${preScale}:flags=lanczos+accurate_rnd`);
+  }
   // One extra frame gives the interpolator a real anchor across the chunk join
   // instead of a duplicate, which is what stops a freeze at the seam.
   const wantAnchor = !!aiPlan.interpolate && !isLastChunk;
@@ -305,7 +331,7 @@ async function processChunk({ ctx, chunk, aiPlan, dirs, report }) {
     fps: fpsSrc,
     outDir: dirs.decoded,
     control,
-    filters: pre.filters.length ? pre.filters.join(',') : null,
+    filters: preFilters.length ? preFilters.join(',') : null,
     onProgress: (p) => report('decode', p.fraction || 0)
   });
 
@@ -340,7 +366,10 @@ async function processChunk({ ctx, chunk, aiPlan, dirs, report }) {
     workingDir = dirs.upscaled;
     const srcW = (geometry.sourceWidth || (analysis.video && analysis.video.width) || 0);
     const srcH = (geometry.sourceHeight || (analysis.video && analysis.video.height) || 0);
-    frameSize = { width: srcW * aiPlan.upscale.inferenceScale, height: srcH * aiPlan.upscale.inferenceScale };
+    // The network saw a pre-scaled frame where Balanced asked for one, so the
+    // frames on disk are `preScale * inferenceScale` times the source.
+    const net = preScale * aiPlan.upscale.inferenceScale;
+    frameSize = { width: Math.round(srcW * net), height: Math.round(srcH * net) };
     // The decoded originals are dead weight once the network has consumed them.
     frames.ensureEmptyDir(dirs.decoded);
   }
@@ -524,6 +553,11 @@ async function runNeuralPipeline(ctx) {
   const metrics = { tileSize: null, sceneCuts: 0, framesProcessed: 0, chunksDone: checkpoint.completedChunks.length };
   const startedAt = Date.now();
 
+  // How many frames the network will process over the whole job. The rate is
+  // only useful against a total, and the total is knowable before we start.
+  const srcFps = (ctx.geometry && ctx.geometry.sourceFps) || 30;
+  ctx.totalNeuralFrames = Math.max(1, Math.round((plan.totalDuration || 0) * srcFps));
+
   for (const chunk of plan.chunks) {
     if (checkpoint.completedChunks.includes(chunk.index)) continue;
     if (control.cancelled) throw new VisionanceError(CODES.CANCELLED);
@@ -559,6 +593,11 @@ async function runNeuralPipeline(ctx) {
       const within = chunkFraction(phase, fraction);
       const overall = (checkpoint.completedChunks.length + within) / totalChunks;
       const stageId = phase === 'upscale' ? 'UPSCALE' : phase === 'interpolate' ? 'INTERPOLATE' : 'ENCODE';
+      // Frames the network has genuinely finished, job-wide, so the queue can
+      // compute a rate from work rather than from a progress bar. Counted
+      // across chunks *and* within the chunk in flight, because a short clip is
+      // one chunk and would otherwise never produce an estimate at all.
+      const inFlight = (extra && Number(extra.producedFrames)) || 0;
       reportStage(stageId, overall, message, {
         chunk: chunk.index + 1,
         totalChunks,
@@ -566,6 +605,9 @@ async function runNeuralPipeline(ctx) {
         tileSize: metrics.tileSize,
         gpu: describeGpu(aiPlan),
         model: describeModel(aiPlan),
+        neuralFramesDone: metrics.framesProcessed + inFlight,
+        neuralFramesTotal: ctx.totalNeuralFrames || null,
+        neuralStartedAt: startedAt,
         ...extra
       });
     };
@@ -711,12 +753,19 @@ function estimateWorkingBytes({ recipe, geometry, plan, aiPlan }) {
   const srcFrames = Math.ceil((chunk.durationSeconds || 0) * fpsSrc) + 1;
   const outFrames = Math.ceil((chunk.durationSeconds || 0) * fpsDst) + 1;
 
-  const scale = aiPlan.upscale ? aiPlan.upscale.inferenceScale : 1;
-  const w = (geometry.sourceWidth || 1920) * scale;
-  const h = (geometry.sourceHeight || 1080) * scale;
+  // Frames land at `preScale * inferenceScale` times the source, not at the
+  // inference scale: Balanced feeds the network a half-size frame, so its
+  // output is half the size the raw scale would suggest.
+  const pre = (aiPlan.upscale && aiPlan.upscale.preScale) || 1;
+  const scale = aiPlan.upscale ? aiPlan.upscale.inferenceScale * pre : 1;
+  const w = Math.round((geometry.sourceWidth || 1920) * scale);
+  const h = Math.round((geometry.sourceHeight || 1080) * scale);
 
+  // The decoded frames are pre-scaled too, where a pre-scale applies.
   const decoded = frames.estimateChunkBytes({
-    width: geometry.sourceWidth || 1920, height: geometry.sourceHeight || 1080, frames: srcFrames, stages: 1
+    width: Math.round((geometry.sourceWidth || 1920) * pre),
+    height: Math.round((geometry.sourceHeight || 1080) * pre),
+    frames: srcFrames, stages: 1
   });
   const upscaled = aiPlan.upscale
     ? frames.estimateChunkBytes({ width: w, height: h, frames: srcFrames, stages: 1 })

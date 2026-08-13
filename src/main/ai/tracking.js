@@ -225,6 +225,8 @@ function buildTrajectory({ samples, cuts = [], profile = 'auto', minConfidence =
   let haveLock = false;
   let fallbacks = 0;
   let holds = 0;
+  let tracked = 0;
+  let trackedConfidence = 0;
   let nextCut = 0;
 
   for (let i = 0; i < samples.length; i++) {
@@ -243,6 +245,13 @@ function buildTrajectory({ samples, cuts = [], profile = 'auto', minConfidence =
         // Jump straight to the new shot's subject rather than gliding.
         current = s.center;
         haveLock = true;
+        tracked++;
+        trackedConfidence += s.confidence;
+      } else {
+        // A cut into a shot we cannot read is a centre fallback like any
+        // other. Counting it as neither used to make the totals not add up.
+        holds++;
+        fallbacks++;
       }
       points.push({ time: s.time, center: current, cut: true });
       continue;
@@ -256,6 +265,9 @@ function buildTrajectory({ samples, cuts = [], profile = 'auto', minConfidence =
       points.push({ time: s.time, center: current });
       continue;
     }
+
+    tracked++;
+    trackedConfidence += s.confidence;
 
     const target = s.center;
 
@@ -288,7 +300,91 @@ function buildTrajectory({ samples, cuts = [], profile = 'auto', minConfidence =
     points.push({ time: s.time, center: current });
   }
 
-  return { points, fallbacks, holds };
+  return {
+    points,
+    fallbacks,
+    holds,
+    tracked,
+    // Mean confidence **of the samples that were actually used**. Averaging in
+    // the ones we rejected would describe neither the detector nor the result.
+    trackedConfidence: tracked > 0 ? trackedConfidence / tracked : 0
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Outcome
+ *
+ * One function decides what happened, and every message anyone shows is
+ * derived from it. Before this existed, three places described the same run in
+ * their own vocabulary against their own thresholds - the queue printed the
+ * mean confidence of the *raw detector* over every sample, `tracking.js`
+ * warned from a fallback count, and `filters.js` announced "the crop follows
+ * the subject" purely because the compiled expression was not a constant. So a
+ * job could report "100% confidence, crop follows the subject" directly above
+ * "the subject could not be located reliably". All three were reading
+ * different numbers; none of them was reading the outcome.
+ * ------------------------------------------------------------------ */
+
+/** Below this share of usable samples, the crop is not really tracking. */
+const TRACKED_OK = 0.6;
+const TRACKED_PARTIAL = 0.25;
+
+/**
+ * @param {object} o { samples, tracked, holds, fallbacks, trackedConfidence, cuts }
+ * @returns {{outcome, coverage, confidence, tracked, held, centred, samples,
+ *            scenes, headline, detail, warning}}
+ */
+function summariseTracking({ samples, tracked, holds, fallbacks, trackedConfidence, cuts = 0 }) {
+  const total = Math.max(1, samples);
+  const coverage = tracked / total;
+  const confidence = tracked > 0 ? trackedConfidence : 0;
+  const scenes = cuts + 1;
+
+  // `holds` counts every sample that reused the previous position; `fallbacks`
+  // is the subset that had no previous position to reuse and therefore sat at
+  // the centre. They are nested, not parallel, and reporting them as if they
+  // were parallel was half the confusion.
+  const centred = fallbacks;
+  const held = Math.max(0, holds - fallbacks);
+
+  let outcome;
+  if (coverage >= TRACKED_OK) outcome = 'tracked';
+  else if (coverage >= TRACKED_PARTIAL) outcome = 'partial';
+  else outcome = 'centred';
+
+  const pct = Math.round(confidence * 100);
+  let headline;
+  let warning = null;
+
+  if (outcome === 'tracked') {
+    headline = `Tracked ${tracked} of ${total} samples · confidence ${pct}%`;
+  } else if (outcome === 'partial') {
+    headline = `Tracked ${tracked} of ${total} samples · confidence ${pct}%`;
+    warning = `Smart Reframe could only follow the subject for ${Math.round(coverage * 100)}% of this clip; ` +
+      'the rest holds the last good position.';
+  } else {
+    headline = `Tracked ${tracked} of ${total} samples`;
+    warning = 'The subject could not be tracked reliably, so centre framing was used.';
+  }
+
+  const detail = [];
+  if (scenes > 1) detail.push(`${scenes} scenes`);
+  if (held > 0) detail.push(`${held} held near the previous crop`);
+  if (centred > 0) detail.push(`${centred} centred`);
+
+  return {
+    outcome,
+    samples: total,
+    tracked,
+    held,
+    centred,
+    coverage: Math.round(coverage * 1000) / 1000,
+    confidence: Math.round(confidence * 1000) / 1000,
+    scenes,
+    headline,
+    detail,
+    warning
+  };
 }
 
 /**
@@ -318,21 +414,31 @@ async function analyseSubject({
   }
 
   const trajectory = buildTrajectory({ samples, cuts, profile });
-  const meanConfidence = samples.reduce((a, s) => a + s.confidence, 0) / samples.length;
 
   // How wide the crop window is, as a fraction of the source width.
   const cropWidthFraction = Math.min(1, (targetAspect / sourceAspect));
 
-  if (trajectory.fallbacks > samples.length * 0.5) {
-    notes.push('The subject could not be located reliably; the crop stays near the centre.');
-  }
-
-  log.info('subject analysis', {
+  const summary = summariseTracking({
     samples: samples.length,
-    meanConfidence: Math.round(meanConfidence * 100) / 100,
+    tracked: trajectory.tracked,
     holds: trajectory.holds,
     fallbacks: trajectory.fallbacks,
+    trackedConfidence: trajectory.trackedConfidence,
     cuts: cuts.length
+  });
+
+  // The single source of truth for what to say about this run.
+  if (summary.warning) notes.push(summary.warning);
+
+  log.info('subject analysis', {
+    outcome: summary.outcome,
+    samples: summary.samples,
+    tracked: summary.tracked,
+    held: summary.held,
+    centred: summary.centred,
+    coverage: summary.coverage,
+    confidence: summary.confidence,
+    scenes: summary.scenes
   });
 
   return {
@@ -341,9 +447,11 @@ async function analyseSubject({
     points: trajectory.points,
     sampleFps: SAMPLE_FPS,
     cropWidthFraction,
+    // Raw counters, kept for the log and for tests.
     fallbacks: trajectory.fallbacks,
     holds: trajectory.holds,
-    confidence: Math.round(meanConfidence * 100) / 100,
+    // The reconciled view everything user-facing reads.
+    ...summary,
     notes
   };
 }
@@ -404,6 +512,7 @@ function round4(v) {
 module.exports = {
   analyseSubject,
   buildTrajectory,
+  summariseTracking,
   buildCropExpression,
   locateSubject,
   motionProfileFor,

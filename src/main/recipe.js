@@ -47,6 +47,8 @@ const RESAMPLERS = ['lanczos', 'bicubic', 'spline', 'bilinear'];
 const INTERPOLATION_MODES = ['none', 'duplicate', 'blend', 'motion', 'ai'];
 /** What the neural reconstructor is being asked to achieve. */
 const AI_MODES = ['restore', 'upscale'];
+/** How much inference to spend reaching the requested scale. */
+const AI_QUALITIES = ['fast', 'balanced', 'quality', 'maximum'];
 const AI_MODELS = ['auto', 'general', 'animation'];
 const FRAMING_MODES = ['fit', 'fill', 'stretch'];
 const FRAMING_TRACKING = ['none', 'center', 'auto'];
@@ -68,8 +70,70 @@ const CANVASES = {
   '9:16': { w: 9, h: 16 },
   '1:1': { w: 1, h: 1 },
   '4:5': { w: 4, h: 5 },
-  '21:9': { w: 21, h: 9 }
+  /**
+   * "21:9" is a marketing name, not an arithmetic one. Every ultrawide panel
+   * and every standard ultrawide resolution - 2560×1080, 3440×1440 - is
+   * actually 64:27 (2.370:1). Using a literal 21÷9 here would make the ratio
+   * disagree with the resolution the same control suggests, which is the sort
+   * of small lie that produces a two-pixel letterbox nobody can explain.
+   */
+  '21:9': { w: 64, h: 27 },
+  '2.39:1': { w: 239, h: 100 },
+  /** Ratio comes from `framing.aspectW` / `framing.aspectH`. */
+  custom: null
 };
+
+/**
+ * Aspect ratio is a first-class output setting, not a side effect of picking a
+ * social platform.
+ *
+ * `suggested` is what the resolution control offers while it is in automatic
+ * mode - changing the ratio moves it, and a resolution the user typed is left
+ * alone. Long edge 1920/2560 so a ratio change never silently multiplies the
+ * pixel count.
+ */
+const ASPECTS = {
+  source: { id: 'source', label: 'Same as source', suggested: null },
+  '16:9': { id: '16:9', label: '16:9 — widescreen', suggested: { width: 1920, height: 1080 } },
+  '9:16': { id: '9:16', label: '9:16 — vertical', suggested: { width: 1080, height: 1920 } },
+  '4:5': { id: '4:5', label: '4:5 — portrait feed', suggested: { width: 1080, height: 1350 } },
+  '1:1': { id: '1:1', label: '1:1 — square', suggested: { width: 1080, height: 1080 } },
+  '21:9': { id: '21:9', label: '21:9 — ultrawide (64:27)', suggested: { width: 2560, height: 1080 } },
+  '2.39:1': { id: '2.39:1', label: '2.39:1 — cinemascope', suggested: { width: 2560, height: 1072 } },
+  custom: { id: 'custom', label: 'Custom ratio', suggested: null }
+};
+
+/** The ratio a canvas id represents, or null for source/unset. */
+function aspectRatioOf(canvasId, framing = null) {
+  if (canvasId === 'custom') {
+    const w = Number(framing && framing.aspectW);
+    const h = Number(framing && framing.aspectH);
+    return w > 0 && h > 0 ? w / h : null;
+  }
+  const c = CANVASES[canvasId];
+  return c ? c.w / c.h : null;
+}
+
+/**
+ * Resolution that suits a ratio, with even dimensions because most encoders
+ * refuse odd ones. Used only while resolution is on automatic.
+ */
+function suggestedResolution(canvasId, framing = null) {
+  const preset = ASPECTS[canvasId];
+  if (preset && preset.suggested) return { ...preset.suggested };
+  const ratio = aspectRatioOf(canvasId, framing);
+  if (!ratio) return null;
+  // Hold the long edge at 1920 so a custom ratio cannot explode the pixel count.
+  if (ratio >= 1) {
+    return { width: 1920, height: evenDim(1920 / ratio) };
+  }
+  return { width: evenDim(1080 * ratio), height: 1920 };
+}
+
+function evenDim(v) {
+  const n = Math.max(16, Math.round(Number(v) || 0));
+  return n % 2 === 0 ? n : n + 1;
+}
 
 /**
  * Platform targets. These only *seed* a recipe - every value stays editable,
@@ -250,6 +314,12 @@ function baseRecipe() {
        */
       aiMode: 'upscale',
       aiScale: 2,
+      /**
+       * How much inference to spend reaching `aiScale`. A separate axis from
+       * the scale itself: 2x output can be reached cheaply or expensively, and
+       * before this existed it was always reached the expensive way.
+       */
+      aiQuality: 'balanced',
       model: 'auto'
     },
 
@@ -409,6 +479,7 @@ function sanitize(input) {
     aiScale: [1, 2, 3, 4].includes(Math.round(Number(rc.aiScale)))
       ? Math.round(Number(rc.aiScale))
       : d.reconstruction.aiScale,
+    aiQuality: pick(rc.aiQuality, AI_QUALITIES, d.reconstruction.aiQuality),
     model: str(rc.model, 120, d.reconstruction.model)
   };
   if (reconstruction.aiMode === 'restore') reconstruction.aiScale = 1;
@@ -441,11 +512,33 @@ function sanitize(input) {
     mode: pick(f.mode, FRAMING_MODES, d.framing.mode),
     background: pick(f.background, BACKGROUNDS, d.framing.background),
     tracking: pick(f.tracking, FRAMING_TRACKING, d.framing.tracking),
+    // Only meaningful for `canvas: 'custom'`. Clamped rather than trusted: a
+    // NaN or a zero here would resolve to a zero-width canvas and fail deep
+    // inside ffmpeg instead of here.
+    aspectW: optInt(f.aspectW, 1, 1000),
+    aspectH: optInt(f.aspectH, 1, 1000),
     crop: sanitizeCrop(f.crop)
   };
   // 'auto' is Smart Reframe and is implemented; whether a usable trajectory can
   // be produced is a run-time question, answered by the REFRAME stage, which
   // falls back to centre framing and says so.
+
+  if (framing.canvas === 'custom' && !(framing.aspectW && framing.aspectH) &&
+      !(framing.width && framing.height)) {
+    warnings.push('A custom aspect ratio needs both a width and a height ratio; the source ratio was kept.');
+    framing.canvas = 'source';
+  }
+  if (framing.width && framing.height) {
+    const evened = { width: evenDim(framing.width), height: evenDim(framing.height) };
+    if (evened.width !== framing.width || evened.height !== framing.height) {
+      warnings.push(
+        `Output dimensions must be even for the encoder; ${framing.width}×${framing.height} ` +
+        `was adjusted to ${evened.width}×${evened.height}.`
+      );
+      framing.width = evened.width;
+      framing.height = evened.height;
+    }
+  }
 
 
   const c = raw.color || {};
@@ -858,16 +951,17 @@ function resolveOutputGeometry(recipe, analysis) {
     if (recipe.framing.width && recipe.framing.height) {
       canvasWidth = recipe.framing.width;
       canvasHeight = recipe.framing.height;
-    } else if (recipe.framing.canvas !== 'source' && CANVASES[recipe.framing.canvas] && width && height) {
-      const target = CANVASES[recipe.framing.canvas];
-      const aspect = target.w / target.h;
-      // Preserve pixel count roughly, snap the long edge to the source's.
-      if (aspect >= 1) {
-        canvasWidth = width;
-        canvasHeight = Math.round(width / aspect);
-      } else {
-        canvasHeight = height;
-        canvasWidth = Math.round(height * aspect);
+    } else if (recipe.framing.canvas !== 'source' && width && height) {
+      const aspect = aspectRatioOf(recipe.framing.canvas, recipe.framing);
+      if (aspect) {
+        // Preserve pixel count roughly, snap the long edge to the source's.
+        if (aspect >= 1) {
+          canvasWidth = evenDim(width);
+          canvasHeight = evenDim(width / aspect);
+        } else {
+          canvasHeight = evenDim(height);
+          canvasWidth = evenDim(height * aspect);
+        }
       }
     }
   }
@@ -931,9 +1025,13 @@ module.exports = {
   SCHEMA_VERSION,
   PLATFORMS,
   CANVASES,
+  ASPECTS,
+  aspectRatioOf,
+  suggestedResolution,
   RECONSTRUCTION_MODES,
   INTERPOLATION_MODES,
   AI_MODES,
+  AI_QUALITIES,
   AI_MODELS,
   AUDIO_MASTERS,
   baseRecipe,

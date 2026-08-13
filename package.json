@@ -12,13 +12,19 @@
     "dist:win": "electron-builder --win nsis portable",
     "dist:mac": "electron-builder --mac dmg",
     "dist:linux": "electron-builder --linux AppImage deb",
+    "verify:core": "node --test tools/verify-core.js",
+    "verify:watch": "node --test tools/verify-watch.js",
+    "verify:switch": "electron tools/verify-switch.js",
     "verify:gl": "electron tools/verify-electron.js",
     "verify:export": "node tools/verify-export.js",
     "verify:app": "electron tools/smoke.js",
-    "verify": "npm run verify:gl && npm run verify:export && npm run verify:app",
+    "verify": "npm run verify:core && npm run verify:watch && npm run verify:gl && npm run verify:export && npm run verify:ai && npm run verify:creator && npm run verify:switch && npm run verify:app",
     "launch": "node tools/launcher.js",
     "stop": "node tools/launcher.js --stop",
-    "doctor": "node tools/launcher.js --doctor"
+    "doctor": "node tools/launcher.js --doctor",
+    "verify:ai": "node tools/verify-ai.js",
+    "verify:ai:core": "node tools/verify-ai.js --core",
+    "verify:creator": "node tools/verify-creator.js"
   },
   "keywords": [
     "video",

@@ -33,6 +33,22 @@ _legacy/
 tools/smoke-screenshot.png
 coverage/
 
+# Render intermediates. Jobs normally work inside the user data folder, but a
+# render aimed at the repo would leave these behind.
+# Anchored with a leading slash: an unanchored `work/` or `engines/` would also
+# match source directories such as src/main/ai/engines/.
+*.vspart
+/work/
+/jobs/
+
+# Downloaded AI engines, models and managed runtimes. These live in the user
+# data folder and are hundreds of megabytes; they must never be committed.
+/engines/
+/models/
+/runtimes/
+*.ncnn.bin
+*.ncnn.param
+
 # OS / editor noise
 .DS_Store
 Thumbs.db

@@ -20,19 +20,81 @@ function on(channel, handler) {
 contextBridge.exposeInMainWorld('visionance', {
   app: {
     info: () => invoke('app:info'),
-    encoders: () => invoke('app:encoders')
+    capabilities: (opts) => invoke('app:capabilities', opts),
+    encoders: () => invoke('app:encoders'),
+    logs: () => invoke('app:logs')
   },
 
   dialog: {
     openVideo: () => invoke('dialog:openVideo'),
-    saveVideo: (defaultName) => invoke('dialog:saveVideo', defaultName),
-    pickBinary: (which) => invoke('dialog:pickBinary', which)
+    saveVideo: (defaultName, container) => invoke('dialog:saveVideo', defaultName, container),
+    pickBinary: (which) => invoke('dialog:pickBinary', which),
+    pickCookiesFile: () => invoke('dialog:pickCookiesFile')
   },
 
   media: {
     open: (filePath) => invoke('media:open', filePath),
+    analyze: (target, opts) => invoke('media:analyze', target, opts),
     resolveUrl: (url, opts) => invoke('media:resolveUrl', url, opts),
+    refreshStream: (token) => invoke('media:refreshStream', token),
+    releaseStream: (token) => invoke('media:releaseStream', token),
+    transferStats: () => invoke('media:transferStats'),
     localUrl: (filePath) => invoke('media:localUrl', filePath)
+  },
+
+  recipe: {
+    platforms: () => invoke('recipe:platforms'),
+    default: (analysis, overrides) => invoke('recipe:default', analysis, overrides),
+    fromPreview: (params, analysis, overrides) => invoke('recipe:fromPreview', params, analysis, overrides),
+    applyPlatform: (recipe, platformId) => invoke('recipe:applyPlatform', recipe, platformId),
+    sanitize: (recipe) => invoke('recipe:sanitize', recipe)
+  },
+
+  auto: {
+    profiles: () => invoke('auto:profiles'),
+    build: (request) => invoke('auto:build', request)
+  },
+
+  creatorPresets: {
+    list: () => invoke('presets:creator'),
+    apply: (id, request) => invoke('presets:applyCreator', id, request)
+  },
+
+  savedRecipes: {
+    list: () => invoke('recipes:list'),
+    save: (name, recipe) => invoke('recipes:save', name, recipe),
+    rename: (id, name) => invoke('recipes:rename', id, name),
+    duplicate: (id) => invoke('recipes:duplicate', id),
+    remove: (id) => invoke('recipes:delete', id)
+  },
+
+  jobs: {
+    list: () => invoke('jobs:list'),
+    create: (request) => invoke('jobs:create', request),
+    start: (id) => invoke('jobs:start', id),
+    cancel: (id) => invoke('jobs:cancel', id),
+    pause: (id) => invoke('jobs:pause', id),
+    resume: (id) => invoke('jobs:resume', id),
+    retry: (id) => invoke('jobs:retry', id),
+    remove: (id) => invoke('jobs:remove', id),
+    clear: () => invoke('jobs:clear'),
+    onUpdate: (cb) => on('jobs:update', cb),
+    onRemoved: (cb) => on('jobs:removed', cb)
+  },
+
+  engines: {
+    status: (opts) => invoke('engines:status', opts),
+    install: (id) => invoke('engines:install', id),
+    cancelInstall: (id) => invoke('engines:cancelInstall', id),
+    remove: (id) => invoke('engines:remove', id),
+    onProgress: (cb) => on('engines:progress', cb),
+    onStatus: (cb) => on('engines:status', cb)
+  },
+
+  runtime: {
+    status: () => invoke('runtime:status'),
+    install: () => invoke('runtime:install'),
+    onProgress: (cb) => on('runtime:progress', cb)
   },
 
   ytdlp: {
@@ -61,14 +123,6 @@ contextBridge.exposeInMainWorld('visionance', {
   resume: {
     get: (key) => invoke('resume:get', key),
     set: (key, seconds) => invoke('resume:set', key, seconds)
-  },
-
-  exports: {
-    start: (cfg) => invoke('export:start', cfg),
-    cancel: (id) => invoke('export:cancel', id),
-    list: () => invoke('export:list'),
-    clear: () => invoke('export:clear'),
-    onUpdate: (cb) => on('export:update', cb)
   },
 
   system: {

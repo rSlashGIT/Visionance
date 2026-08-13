@@ -109,6 +109,13 @@ function resolve(name, opts = {}) {
   const downloaded = path.join(userBinDir(), fileName);
   if (isExecutableFile(downloaded)) return downloaded;
 
+  // Lets a verification harness run against its own throwaway user-data folder
+  // while still using the binaries the real installation downloaded.
+  if (process.env.VISIONANCE_BIN_DIR) {
+    const extra = path.join(process.env.VISIONANCE_BIN_DIR, fileName);
+    if (isExecutableFile(extra)) return extra;
+  }
+
   if (name === 'ffmpeg') {
     const m = fromNodeModule('ffmpeg-static');
     if (m) return m;

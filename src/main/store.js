@@ -10,7 +10,7 @@ const path = require('path');
 const { app } = require('electron');
 
 const DEFAULTS = {
-  version: 2,
+  version: 3,
   window: { width: 1360, height: 860, x: null, y: null, maximized: false },
   settings: {
     lastPresetId: 'balanced',
@@ -22,11 +22,30 @@ const DEFAULTS = {
     showStats: false,
     autoplay: true,
     rememberPosition: true,
-    ytdlpFormat: 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+    // 0 means "let the stream policy decide from the display and hardware".
+    maxStreamHeight: 0,
+    watchQuality: 'auto',
+    /**
+     * How Visionance authenticates to a site, when - and only when - the site
+     * says authentication is required. `none` means public access only, and it
+     * is the default: reading a browser's cookie jar is reading a credential
+     * store, so it never happens without an explicit choice here.
+     */
+    auth: {
+      mode: 'none',       // 'none' | 'browser' | 'file'
+      browser: '',        // chrome | edge | firefox | brave | safari | ...
+      cookiesFile: ''
+    },
     binaries: { ffmpeg: '', ffprobe: '', ytdlp: '' },
-    exportDir: ''
+    exportDir: '',
+    create: {
+      lastPlatform: 'custom',
+      lastQuality: 70,
+      chunkedRenders: false
+    }
   },
-  presets: {},        // user-defined presets, keyed by id
+  presets: {},        // user-defined Watch looks, keyed by id
+  userRecipes: {},    // saved Create recipes, keyed by id
   recents: [],        // { source, kind, title, at, position, duration }
   resume: {}          // sourceKey -> seconds
 };
@@ -41,7 +60,7 @@ class Store {
     try {
       const raw = fs.readFileSync(this.file, 'utf8');
       const parsed = JSON.parse(raw);
-      return deepMerge(structuredClone(DEFAULTS), parsed);
+      return migrate(deepMerge(structuredClone(DEFAULTS), parsed));
     } catch {
       return structuredClone(DEFAULTS);
     }
@@ -110,6 +129,23 @@ class Store {
   getResume(sourceKey) {
     return this.data.resume[sourceKey] || 0;
   }
+}
+
+/**
+ * Upgrade older on-disk shapes.
+ * v2 stored `cookiesFromBrowser` and used it on *every* request. v3 keeps the
+ * user's browser choice but moves it behind the authentication policy, which
+ * only reaches for cookies when a site actually demands a signed-in account.
+ */
+function migrate(data) {
+  const s = data.settings || {};
+  if (s.cookiesFromBrowser && (!s.auth || s.auth.mode === 'none')) {
+    s.auth = { mode: 'browser', browser: String(s.cookiesFromBrowser), cookiesFile: '' };
+  }
+  delete s.cookiesFromBrowser;
+  delete s.ytdlpFormat; // never read; format choice is made in ytdlp.js
+  data.version = DEFAULTS.version;
+  return data;
 }
 
 function isPlainObject(v) {

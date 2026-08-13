@@ -1,0 +1,416 @@
+'use strict';
+
+/**
+ * Smart Reframe: deciding where to crop a 16:9 shot to make a 9:16 one.
+ *
+ * Backend choice
+ * --------------
+ * This is a **saliency tracker**, not a face detector. It samples frames at low
+ * resolution and finds where the interesting content is, using two signals
+ * ffmpeg can produce without any model at all:
+ *
+ *   motion  - inter-frame difference, which finds the moving subject
+ *   detail  - local edge energy, which finds the in-focus subject when nothing
+ *             is moving (a talking head against a blurred background)
+ *
+ * That is a deliberate trade. A face/person detector (an ONNX model such as
+ * YuNet or a MediaPipe graph) would be better for talking-head content and is
+ * the obvious upgrade path - the interface below is built for it, and
+ * `TRACKER_BACKENDS` names the slot. But a detector is a ~10-100 MB model, a
+ * runtime dependency and a licence to manage, and shipping a *working, tested*
+ * saliency tracker beats shipping a half-integrated detector. What matters is
+ * that the app never claims to be doing face detection when it is not: the
+ * backend id travels with the trajectory and is surfaced in the UI and logs.
+ *
+ * Everything here is local. No cloud, no API key, no Python.
+ */
+
+const path = require('path');
+const fs = require('fs');
+const { FfmpegRun } = require('../ffmpeg/process');
+const { headerBlob } = require('../media-analyzer');
+const { VisionanceError, CODES } = require('../errors');
+const { logger } = require('../logger');
+
+const log = logger.child('reframe');
+
+const TRACKER_BACKENDS = {
+  /** Implemented here: motion + detail saliency, no model required. */
+  saliency: { id: 'saliency', label: 'Motion & detail saliency', requiresModel: false },
+  /** Reserved for a future ONNX face/person detector. */
+  faces: { id: 'faces', label: 'Face detection', requiresModel: true }
+};
+
+/** Analysis grid. Coarse on purpose: we need a position, not a segmentation. */
+const GRID_W = 32;
+const GRID_H = 18;
+/** Frames per second to sample. Subject position does not change that fast. */
+const SAMPLE_FPS = 4;
+
+/* ------------------------------------------------------------------ *
+ * Sampling
+ * ------------------------------------------------------------------ */
+
+/**
+ * Decode a low-resolution greyscale grid for every sampled frame.
+ *
+ * One ffmpeg pass, raw bytes on stdout: GRID_W * GRID_H bytes per frame at
+ * SAMPLE_FPS. For a 60 s clip that is about 1.4 MB total - the whole point of
+ * not writing analysis images to disk.
+ */
+function sampleGrid({ ffmpeg, input, headers, startSeconds = 0, durationSeconds, control }) {
+  return new Promise((resolve, reject) => {
+    const args = ['-hide_banner', '-loglevel', 'error', '-nostdin'];
+    if (/^https?:/i.test(input)) {
+      args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5');
+    }
+    const blob = headerBlob(headers);
+    if (blob) args.push('-headers', blob);
+    if (startSeconds > 0) args.push('-ss', String(startSeconds));
+    args.push('-i', input);
+    if (durationSeconds) args.push('-t', String(durationSeconds));
+    args.push('-vf', `fps=${SAMPLE_FPS},scale=${GRID_W}:${GRID_H}:flags=area,format=gray`);
+    args.push('-f', 'rawvideo', '-pix_fmt', 'gray', '-');
+
+    const { spawn } = require('child_process');
+    const proc = spawn(ffmpeg, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    if (control) control.activeRun = { cancel: () => { try { proc.kill(); } catch { /* gone */ } } };
+
+    const chunks = [];
+    let stderr = '';
+    proc.stdout.on('data', (c) => chunks.push(c));
+    proc.stderr.on('data', (c) => { stderr = (stderr + c.toString()).slice(-2000); });
+    proc.on('error', (err) => reject(new VisionanceError(CODES.STAGE_FAILED, {
+      message: 'Subject analysis could not start.',
+      technicalDetails: err.message
+    })));
+    proc.on('close', (code) => {
+      if (control) control.activeRun = null;
+      if (control && control.cancelled) return reject(new VisionanceError(CODES.CANCELLED));
+      if (code !== 0) {
+        return reject(new VisionanceError(CODES.STAGE_FAILED, {
+          message: 'Subject analysis failed.',
+          technicalDetails: `ffmpeg exit ${code}: ${stderr.slice(-300)}`
+        }));
+      }
+      const buf = Buffer.concat(chunks);
+      const frameSize = GRID_W * GRID_H;
+      const frames = [];
+      for (let off = 0; off + frameSize <= buf.length; off += frameSize) {
+        frames.push(buf.subarray(off, off + frameSize));
+      }
+      resolve(frames);
+    });
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Saliency
+ * ------------------------------------------------------------------ */
+
+/** Local edge energy: how much detail sits in each column. */
+function detailColumns(frame) {
+  const cols = new Float64Array(GRID_W);
+  for (let y = 1; y < GRID_H - 1; y++) {
+    for (let x = 1; x < GRID_W - 1; x++) {
+      const i = y * GRID_W + x;
+      const dx = Math.abs(frame[i + 1] - frame[i - 1]);
+      const dy = Math.abs(frame[i + GRID_W] - frame[i - GRID_W]);
+      cols[x] += dx + dy;
+    }
+  }
+  return cols;
+}
+
+/** Inter-frame motion per column. */
+function motionColumns(frame, prev) {
+  const cols = new Float64Array(GRID_W);
+  if (!prev) return cols;
+  for (let y = 0; y < GRID_H; y++) {
+    for (let x = 0; x < GRID_W; x++) {
+      const i = y * GRID_W + x;
+      cols[x] += Math.abs(frame[i] - prev[i]);
+    }
+  }
+  return cols;
+}
+
+/**
+ * Where is the subject, horizontally, in this frame?
+ * @returns {{center:number, confidence:number}} center is 0..1 across the frame
+ */
+function locateSubject(frame, prev) {
+  const motion = motionColumns(frame, prev);
+  const detail = detailColumns(frame);
+
+  const motionSum = motion.reduce((a, b) => a + b, 0);
+  const detailSum = detail.reduce((a, b) => a + b, 0);
+
+  // Motion is the stronger cue when there is any; detail carries a static shot.
+  const weights = new Float64Array(GRID_W);
+  for (let x = 0; x < GRID_W; x++) {
+    const m = motionSum > 0 ? motion[x] / motionSum : 0;
+    const dtl = detailSum > 0 ? detail[x] / detailSum : 0;
+    weights[x] = motionSum > detailSum * 0.05 ? m * 0.75 + dtl * 0.25 : dtl;
+  }
+
+  const total = weights.reduce((a, b) => a + b, 0);
+  if (total <= 0) return { center: 0.5, confidence: 0 };
+
+  let centroid = 0;
+  for (let x = 0; x < GRID_W; x++) centroid += ((x + 0.5) / GRID_W) * weights[x];
+  centroid /= total;
+
+  // Confidence: how concentrated the energy is. A flat distribution means
+  // "everything is equally interesting", which is the same as knowing nothing.
+  let variance = 0;
+  for (let x = 0; x < GRID_W; x++) {
+    const p = weights[x] / total;
+    variance += p * Math.pow((x + 0.5) / GRID_W - centroid, 2);
+  }
+  const spread = Math.sqrt(variance);
+  const confidence = Math.max(0, Math.min(1, 1 - spread / 0.29));
+
+  return { center: centroid, confidence };
+}
+
+/* ------------------------------------------------------------------ *
+ * Trajectory
+ * ------------------------------------------------------------------ */
+
+/** How hard the crop is allowed to chase the subject, per content profile. */
+/**
+ * `smoothing` is the fraction of the remaining error corrected per sample, and
+ * `maxStepPerSecond` caps how fast the crop may travel. The two do different
+ * jobs: smoothing stops the crop twitching, the cap stops it whip-panning.
+ *
+ * Smoothing has to be high enough to actually catch a moving subject - a 9:16
+ * crop of a 16:9 frame is only ~32% of the width, so a crop that lags by a
+ * quarter of the frame has already lost the subject.
+ */
+const MOTION_PROFILES = {
+  calm: { smoothing: 0.18, maxStepPerSecond: 0.2, deadZone: 0.05 },
+  normal: { smoothing: 0.32, maxStepPerSecond: 0.45, deadZone: 0.035 },
+  fast: { smoothing: 0.5, maxStepPerSecond: 0.9, deadZone: 0.02 }
+};
+
+function motionProfileFor(profile) {
+  if (profile === 'film' || profile === 'dialogue' || profile === 'screencast') return 'calm';
+  if (profile === 'action' || profile === 'gaming') return 'fast';
+  return 'normal';
+}
+
+/**
+ * Turn per-sample observations into a smooth, bounded crop path.
+ *
+ * Three properties matter more than accuracy:
+ *   - it must not oscillate (a crop that jitters left/right is unwatchable)
+ *   - it must not lag so far that the subject leaves the frame
+ *   - it must snap, not glide, across a hard cut - gliding across a cut looks
+ *     like a camera move that never happened
+ *
+ * @param {object} o
+ *   samples   [{ time, center, confidence }]
+ *   cuts      cut timestamps in seconds
+ *   profile   content profile id
+ *   minConfidence
+ * @returns {{points:Array<{time,center}>, backend, fallbacks:number, holds:number}}
+ */
+function buildTrajectory({ samples, cuts = [], profile = 'auto', minConfidence = 0.18 }) {
+  const tuning = MOTION_PROFILES[motionProfileFor(profile)];
+  const cutSet = [...cuts].sort((a, b) => a - b);
+
+  const points = [];
+  let current = 0.5;
+  let haveLock = false;
+  let fallbacks = 0;
+  let holds = 0;
+  let nextCut = 0;
+
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i];
+    const prevTime = i > 0 ? samples[i - 1].time : 0;
+
+    // A hard cut invalidates everything we knew about where the subject was.
+    let crossedCut = false;
+    while (nextCut < cutSet.length && cutSet[nextCut] <= s.time) {
+      if (cutSet[nextCut] > prevTime) crossedCut = true;
+      nextCut++;
+    }
+    if (crossedCut) {
+      haveLock = false;
+      if (s.confidence >= minConfidence) {
+        // Jump straight to the new shot's subject rather than gliding.
+        current = s.center;
+        haveLock = true;
+      }
+      points.push({ time: s.time, center: current, cut: true });
+      continue;
+    }
+
+    if (s.confidence < minConfidence) {
+      // Detection is unreliable for this frame: hold the last good position
+      // rather than lurching to a meaningless centroid.
+      holds++;
+      if (!haveLock) fallbacks++;
+      points.push({ time: s.time, center: current });
+      continue;
+    }
+
+    const target = s.center;
+
+    // No lock yet - the very first confident detection, or the first one after
+    // a lost stretch. Start *at* the subject rather than gliding in from the
+    // centre, which would waste the opening second of the shot on a move the
+    // camera never made.
+    if (!haveLock) {
+      current = target;
+      haveLock = true;
+      points.push({ time: s.time, center: current });
+      continue;
+    }
+
+    const delta = target - current;
+
+    // Dead zone: ignore small wobble so a stationary subject gives a still crop.
+    if (Math.abs(delta) < tuning.deadZone) {
+      points.push({ time: s.time, center: current });
+      haveLock = true;
+      continue;
+    }
+
+    const dt = Math.max(1 / SAMPLE_FPS, s.time - prevTime);
+    const maxStep = tuning.maxStepPerSecond * dt;
+    const smoothed = delta * tuning.smoothing;
+    const step = Math.max(-maxStep, Math.min(maxStep, smoothed));
+    current = Math.max(0, Math.min(1, current + step));
+    haveLock = true;
+    points.push({ time: s.time, center: current });
+  }
+
+  return { points, fallbacks, holds };
+}
+
+/**
+ * Analyse a source and produce a crop trajectory.
+ *
+ * @returns {{backend, points, width, cropWidthFraction, fallbacks, holds,
+ *            confidence, notes:string[]}}
+ */
+async function analyseSubject({
+  ffmpeg, input, headers = null, startSeconds = 0, durationSeconds,
+  cuts = [], profile = 'auto', targetAspect, sourceAspect, control = null
+}) {
+  const notes = [];
+  const frames = await sampleGrid({ ffmpeg, input, headers, startSeconds, durationSeconds, control });
+  if (!frames.length) {
+    throw new VisionanceError(CODES.STAGE_FAILED, {
+      message: 'Subject analysis produced no frames.'
+    });
+  }
+
+  const samples = [];
+  let prev = null;
+  for (let i = 0; i < frames.length; i++) {
+    const { center, confidence } = locateSubject(frames[i], prev);
+    samples.push({ time: i / SAMPLE_FPS, center, confidence });
+    prev = frames[i];
+  }
+
+  const trajectory = buildTrajectory({ samples, cuts, profile });
+  const meanConfidence = samples.reduce((a, s) => a + s.confidence, 0) / samples.length;
+
+  // How wide the crop window is, as a fraction of the source width.
+  const cropWidthFraction = Math.min(1, (targetAspect / sourceAspect));
+
+  if (trajectory.fallbacks > samples.length * 0.5) {
+    notes.push('The subject could not be located reliably; the crop stays near the centre.');
+  }
+
+  log.info('subject analysis', {
+    samples: samples.length,
+    meanConfidence: Math.round(meanConfidence * 100) / 100,
+    holds: trajectory.holds,
+    fallbacks: trajectory.fallbacks,
+    cuts: cuts.length
+  });
+
+  return {
+    backend: TRACKER_BACKENDS.saliency.id,
+    backendLabel: TRACKER_BACKENDS.saliency.label,
+    points: trajectory.points,
+    sampleFps: SAMPLE_FPS,
+    cropWidthFraction,
+    fallbacks: trajectory.fallbacks,
+    holds: trajectory.holds,
+    confidence: Math.round(meanConfidence * 100) / 100,
+    notes
+  };
+}
+
+/**
+ * Compile a trajectory into an ffmpeg crop expression.
+ *
+ * The x position is a piecewise-linear function of time, expressed with
+ * nested `if(lt(t,..))` terms. Keeping it declarative means the crop happens
+ * inside the same filter graph as everything else - no second pass, no frame
+ * dump, and it composes with chunked rendering because `t` is chunk-relative.
+ */
+function buildCropExpression({ points, cropWidthFraction, maxTerms = 400 }) {
+  const w = Math.min(1, Math.max(0.05, cropWidthFraction));
+  if (!points || !points.length) {
+    return { expr: `(iw-ow)/2`, static: true, points: 0 };
+  }
+
+  // Collapse runs where the crop does not move; a static shot should not
+  // produce hundreds of identical terms.
+  const simplified = [];
+  for (const p of points) {
+    const last = simplified[simplified.length - 1];
+    if (!last || Math.abs(last.center - p.center) > 0.004 || p.cut) simplified.push(p);
+  }
+  const use = simplified.length > maxTerms
+    ? simplified.filter((_, i) => i % Math.ceil(simplified.length / maxTerms) === 0)
+    : simplified;
+
+  if (use.length === 1) {
+    const x = clamp01(use[0].center - w / 2) ;
+    return { expr: `iw*${round4(x)}`, static: true, points: 1 };
+  }
+
+  // Build from the end backwards so each term shadows the later ones.
+  let expr = `iw*${round4(clamp01(use[use.length - 1].center - w / 2))}`;
+  for (let i = use.length - 2; i >= 0; i--) {
+    const t0 = use[i].time;
+    const t1 = use[i + 1].time;
+    const x0 = clamp01(use[i].center - w / 2);
+    const x1 = clamp01(use[i + 1].center - w / 2);
+    const span = Math.max(0.0001, t1 - t0);
+    // Linear interpolation between the two sample positions.
+    const lerp = `iw*(${round4(x0)}+(${round4(x1 - x0)})*(t-${round4(t0)})/${round4(span)})`;
+    expr = `if(lt(t,${round4(t1)}),${lerp},${expr})`;
+  }
+  return { expr, static: false, points: use.length };
+}
+
+function clamp01(v) {
+  return Math.min(1, Math.max(0, v));
+}
+
+function round4(v) {
+  return Math.round(v * 10000) / 10000;
+}
+
+module.exports = {
+  analyseSubject,
+  buildTrajectory,
+  buildCropExpression,
+  locateSubject,
+  motionProfileFor,
+  sampleGrid,
+  TRACKER_BACKENDS,
+  MOTION_PROFILES,
+  GRID_W,
+  GRID_H,
+  SAMPLE_FPS
+};

@@ -173,6 +173,12 @@
       this.targetFps = 60;
       this.onError = null;
 
+      /**
+       * Watch quality policy. This only ever affects realtime enhancement -
+       * Create's offline neural quality is a completely separate setting.
+       */
+      this.policy = 'auto';
+
       this.stats = {
         fps: 0,
         cpuMs: 0,
@@ -181,7 +187,14 @@
         sourceW: 0,
         sourceH: 0,
         droppedScale: 1,
-        gpu: 'unknown'
+        gpu: 'unknown',
+        /** Measured presentation cadence of the *media*, not of our renders. */
+        sourceFps: 0,
+        frameBudgetMs: 0,
+        /** Frames we chose not to enhance because they were already stale. */
+        skipped: 0,
+        limited: false,
+        policy: 'auto'
       };
 
       this._frameTimes = [];
@@ -191,6 +204,22 @@
       this._rvfcHandle = null;
       this._rafHandle = null;
       this._needsDraw = true;
+
+      // Frame pacing state.
+      this._lastFrameAt = 0;
+      this._frameIntervals = [];
+      this._measuredIntervalMs = 0;
+      this._rateWindow = [];
+      this._drawing = false;
+      this._skippedSinceStats = 0;
+      // Governor smoothing: a single slow frame must not drop quality, and a
+      // single fast one must not raise it. Both directions need sustained
+      // evidence, otherwise the picture visibly pulses.
+      this._pressure = 0;
+      this._overloadStreak = 0;
+      this._lastQuality = null;
+      /** Called when enhancement cannot be sustained; see _adapt(). */
+      this.onOverload = null;
 
       this._initGL();
     }
@@ -258,6 +287,19 @@
         this.stop();
         if (this.onError) this.onError(new Error('The GPU context was lost. Reloading the view will restore it.'));
       });
+    }
+
+    /**
+     * Forget everything learned about the previous source's cadence.
+     *
+     * A 24 fps film followed by a 60 fps clip must not be judged against the
+     * film's 41.7 ms budget for the first second, and vice versa.
+     */
+    resetPacing() {
+      this._lastFrameAt = 0;
+      this._frameIntervals = [];
+      this._measuredIntervalMs = 0;
+      this._rateWindow = [];
     }
 
     setVideo(videoEl) {
@@ -328,10 +370,14 @@
 
       const useRvfc = this.video && typeof this.video.requestVideoFrameCallback === 'function';
       if (useRvfc) {
-        const step = () => {
+        const step = (now, meta) => {
           if (!this.running) return;
-          this._drawSafe();
+          this._notePresentation(now, meta);
+          // Ask for the next frame *before* drawing. If this draw overruns, the
+          // callback for the frame we missed has already been registered, so we
+          // resume on the newest frame rather than working through a backlog.
           this._rvfcHandle = this.video.requestVideoFrameCallback(step);
+          this._drawSafe();
         };
         this._rvfcHandle = this.video.requestVideoFrameCallback(step);
         // A low-rate rAF keeps the canvas correct while paused or seeking.
@@ -351,13 +397,72 @@
       }
     }
 
+    /**
+     * Learn the media's real presentation cadence.
+     *
+     * The enhancement budget has to come from the source, not from a fixed
+     * 60 fps assumption: a 24 fps film gives us ~41.7 ms per frame, and
+     * treating that as 16.7 ms makes the governor throw away quality it never
+     * needed to.
+     */
+    _notePresentation(now, meta) {
+      const gap = this._lastFrameAt ? now - this._lastFrameAt : 0;
+
+      if (gap > 1 && gap < 500) {
+        this._frameIntervals.push(gap);
+        if (this._frameIntervals.length > 60) this._frameIntervals.shift();
+        const sorted = [...this._frameIntervals].sort((a, b) => a - b);
+        // Median: robust against the occasional long frame.
+        this._measuredIntervalMs = sorted[Math.floor(sorted.length / 2)];
+      }
+
+      // The interval between *callbacks* overstates the frame interval whenever
+      // the browser coalesces them - which is exactly what a heavy draw causes.
+      // Taking the budget from it would hand the governor more time than the
+      // media actually leaves, so where the compositor's own frame counter is
+      // available it wins: span of wall clock divided by frames genuinely
+      // presented in it.
+      if (meta && Number.isFinite(meta.presentedFrames)) {
+        if (gap >= 500 || !this._rateWindow) this._rateWindow = [];
+        this._rateWindow.push({ at: now, frames: meta.presentedFrames });
+        while (this._rateWindow.length > 2 && now - this._rateWindow[0].at > 2000) {
+          this._rateWindow.shift();
+        }
+        const first = this._rateWindow[0];
+        const last = this._rateWindow[this._rateWindow.length - 1];
+        const frames = last.frames - first.frames;
+        const span = last.at - first.at;
+        if (frames > 0 && span > 250) this._measuredIntervalMs = span / frames;
+      }
+
+      this._lastFrameAt = now;
+    }
+
+    /** Milliseconds available per frame, from the media's own cadence. */
+    frameBudgetMs() {
+      if (this._measuredIntervalMs > 0) return this._measuredIntervalMs;
+      const declared = this.video && this.video.__vsSourceFps;
+      if (declared > 0) return 1000 / declared;
+      return 1000 / Math.max(24, Math.min(120, this.targetFps));
+    }
+
     _drawSafe() {
+      // Never queue work behind work. If the previous draw is still running we
+      // are already late, and the frame it was drawing is the newest one we
+      // have - rendering this one too would only push us further behind.
+      if (this._drawing) {
+        this._skippedSinceStats++;
+        return;
+      }
+      this._drawing = true;
       try {
         this.draw();
       } catch (err) {
         this.stop();
         if (this.onError) this.onError(err);
         else console.error(err);
+      } finally {
+        this._drawing = false;
       }
     }
 
@@ -372,11 +477,13 @@
 
       let factor;
       if (this.renderScaleCap === 'auto') {
-        // Render just enough pixels to saturate the display, capped at 4x so a
+        // Render just enough pixels to saturate the *viewport*, capped so a
         // 360p clip on a 4K panel does not try to hallucinate 12x detail.
+        // Enhancing pixels the user cannot see is pure cost: a 1440p source in
+        // a 1000px-wide window only needs ~1000px of enhancement.
         const fitW = displayW / srcW;
         const fitH = displayH / srcH;
-        factor = Math.min(Math.max(fitW, fitH), 4);
+        factor = Math.min(Math.max(fitW, fitH), this._maxScaleForPolicy());
       } else {
         factor = Number(this.renderScaleCap) || 1;
       }
@@ -404,6 +511,17 @@
         outH = Math.max(srcH, Math.round(outH * s));
       }
       return { outW, outH };
+    }
+
+    /** Upper bound on internal render scale, per Watch quality policy. */
+    _maxScaleForPolicy() {
+      switch (this.policy) {
+        case 'performance': return 1;
+        case 'balanced': return 2;
+        case 'quality': return 3;
+        case 'maximum': return 4;
+        default: return 2.5; // auto
+      }
     }
 
     _uploadVideo() {
@@ -566,6 +684,13 @@
         this.stats.outputW = outW;
         this.stats.outputH = outH;
         this.stats.droppedScale = this._qualityScale;
+        this.stats.sourceFps = this._measuredIntervalMs
+          ? Math.round((1000 / this._measuredIntervalMs) * 10) / 10
+          : 0;
+        this.stats.frameBudgetMs = Math.round(this.frameBudgetMs() * 10) / 10;
+        this.stats.skipped = this._skippedSinceStats;
+        this.stats.policy = this.policy;
+        this._skippedSinceStats = 0;
         this._framesSinceStats = 0;
         this._lastStatsAt = now;
 
@@ -577,18 +702,138 @@
      * If a frame costs more than its share of the frame budget, shrink the
      * render resolution rather than dropping frames. Recovers automatically.
      */
+    /**
+     * The realtime governor.
+     *
+     * Smooth motion beats a sharper still frame, always: if enhancement cannot
+     * keep up with the media's cadence, enhancement gives ground rather than
+     * the playback. Both directions need sustained evidence (`_pressure`) so
+     * the picture does not visibly pulse between quality levels.
+     *
+     *   comfortably inside budget  -> raise slowly
+     *   near the budget            -> hold
+     *   over the budget            -> lower
+     *   far over the budget        -> lower quickly
+     */
     _adapt(avgMs) {
-      const budget = 1000 / Math.max(24, this.targetFps);
-      const overBudget = avgMs > budget * 0.85;
-      if (overBudget && this._qualityScale > 0.5) {
-        this._qualityScale = Math.max(0.5, this._qualityScale - 0.1);
-      } else if (avgMs < budget * 0.45 && this._qualityScale < 1) {
+      const budget = this.frameBudgetMs();
+      const ratio = avgMs / budget;
+      const floor = this._qualityFloor();
+
+      // Our own draw time is not the whole story. Uploading a 1080p frame and
+      // presenting a canvas costs GPU bandwidth that never appears in this
+      // timer, so a pass can measure 0.8 ms of a 16.7 ms budget while the
+      // compositor quietly drops a quarter of the frames. The decoder's own
+      // dropped-frame count is the outcome that actually matters, so it drives
+      // the governor directly.
+      const dropRate = this._sampleDropRate();
+
+      if (dropRate > 0.12) this._pressure += 3;
+      else if (dropRate > 0.04) this._pressure += 2;
+      else if (ratio > 1.15) this._pressure += 2;
+      else if (ratio > 0.85) this._pressure += 1;
+      else if (dropRate < 0.01 && ratio < 0.5) this._pressure -= 1;
+      else this._pressure = Math.sign(this._pressure) * Math.max(0, Math.abs(this._pressure) - 0.5);
+      this.stats.dropRate = Math.round(dropRate * 1000) / 10;
+      this._pressure = Math.max(-4, Math.min(6, this._pressure));
+
+      if (this._pressure >= 4) {
+        // Seriously behind: take a big step rather than bleeding frames while
+        // we creep down in 10% increments.
+        this._qualityScale = Math.max(floor, this._qualityScale - 0.25);
+        this._pressure = 1;
+      } else if (this._pressure >= 2) {
+        this._qualityScale = Math.max(floor, this._qualityScale - 0.1);
+        this._pressure = 0;
+      } else if (this._pressure <= -3 && this._qualityScale < 1) {
+        // Recover gently, so regaining headroom does not immediately cost it.
         this._qualityScale = Math.min(1, this._qualityScale + 0.05);
+        this._pressure = 0;
       }
-      // At the floor and still over budget means the GPU cannot sustain this
-      // look at native resolution; the UI can tell the user rather than just
-      // stuttering silently.
-      this.stats.limited = overBudget && this._qualityScale <= 0.5;
+
+      // At the floor and still losing frames means the GPU cannot sustain this
+      // look; the UI can tell the user rather than just stuttering silently.
+      const atFloor = this._qualityScale <= floor + 0.001;
+      this.stats.limited = (ratio > 1.05 || dropRate > 0.04) && atFloor;
+
+      /*
+       * Last resort: give up on enhancement rather than on the motion.
+       *
+       * Lowering the render scale shrinks the *output*, but the dominant cost
+       * on weak hardware is uploading each source frame into a texture - a
+       * 1080p60 source is roughly 500 MB/s of upload before a single shader
+       * runs, and no output scale fixes that. When we are at the floor and
+       * still losing a large share of frames, the only honest move left is to
+       * stop enhancing and hand presentation back to the compositor.
+       *
+       * Smooth motion is the product promise; a sharper but stuttering picture
+       * is not a trade we make silently.
+       */
+      if (atFloor && dropRate > 0.15) {
+        this._overloadStreak++;
+        if (this._overloadStreak >= 4 && this.onOverload) {
+          this._overloadStreak = 0;
+          this.onOverload({
+            dropRate: Math.round(dropRate * 100),
+            sourceFps: this.stats.sourceFps,
+            policy: this.policy
+          });
+        }
+      } else if (dropRate < 0.05) {
+        this._overloadStreak = 0;
+      }
+    }
+
+    /**
+     * Share of frames the decoder dropped since the last check.
+     * Deltas, not totals: a video that stuttered once at startup must not hold
+     * quality down for the rest of its runtime.
+     */
+    _sampleDropRate() {
+      const v = this.video;
+      if (!v || typeof v.getVideoPlaybackQuality !== 'function') return 0;
+      let q;
+      try {
+        q = v.getVideoPlaybackQuality();
+      } catch {
+        return 0;
+      }
+      const total = q.totalVideoFrames || 0;
+      const dropped = q.droppedVideoFrames || 0;
+      const prev = this._lastQuality || { total: 0, dropped: 0 };
+      this._lastQuality = { total, dropped };
+
+      const dTotal = total - prev.total;
+      const dDropped = dropped - prev.dropped;
+      if (dTotal <= 0) return 0;
+      return Math.max(0, Math.min(1, dDropped / dTotal));
+    }
+
+    /** How far the governor may reduce internal resolution, per policy. */
+    _qualityFloor() {
+      switch (this.policy) {
+        case 'performance': return 0.34;
+        case 'quality': return 0.6;
+        case 'maximum': return 1;
+        case 'balanced': return 0.5;
+        default: return 0.4; // auto
+      }
+    }
+
+    /**
+     * Watch quality policy. Affects realtime enhancement only; Create's neural
+     * quality is a separate setting and is never touched from here.
+     */
+    setPolicy(policy) {
+      const allowed = ['auto', 'performance', 'balanced', 'quality', 'maximum'];
+      this.policy = allowed.includes(policy) ? policy : 'auto';
+      this.stats.policy = this.policy;
+      // 'maximum' means "do not adapt"; everything else keeps the governor on.
+      this.adaptive = this.policy !== 'maximum';
+      if (this.policy === 'maximum') this._qualityScale = 1;
+      this._pressure = 0;
+      this._needsDraw = true;
+      return this.policy;
     }
 
     /** Grab the current enhanced frame as a PNG blob. */

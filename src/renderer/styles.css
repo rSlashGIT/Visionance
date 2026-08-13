@@ -202,6 +202,31 @@ h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 }
 #glCanvas.hidden { display: none; }
 
+/*
+ * Native presentation.
+ *
+ * With enhancement off, the <video> element itself is the picture. That lets
+ * Chromium run decode -> compositor -> display with no JavaScript in the loop,
+ * and lets it use a hardware overlay where the platform supports one. Keeping
+ * the video 1px and off-screen (below) forces every frame through a WebGL
+ * texture upload instead, which is exactly the cost we are avoiding.
+ */
+.stage-inner.native #video {
+  position: relative;
+  left: auto;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  opacity: 1;
+  object-fit: contain;
+  display: block;
+  background: #000;
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px rgba(255,255,255,.04), 0 24px 60px rgba(0,0,0,.6);
+}
+.stage-inner.native #glCanvas { display: none; }
+
 #video, #audio {
   position: absolute;
   width: 1px; height: 1px;
@@ -586,6 +611,8 @@ input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.18); }
   gap: 12px;
   margin-bottom: 8px;
 }
+/* Rows are display:flex, which outranks the UA's [hidden] rule. */
+.field-row[hidden] { display: none; }
 .field-row label { font-size: 13px; color: var(--text-dim); }
 .field-row .val { font-family: var(--mono); font-size: 11px; color: var(--accent); }
 .field-row input[type=range] { flex: 1; max-width: 150px; }
@@ -715,9 +742,12 @@ input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.18); }
   white-space: nowrap;
 }
 .job-status { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-faint); }
-.job-status.running { color: var(--accent); }
-.job-status.done    { color: var(--ok); }
-.job-status.failed  { color: var(--danger); }
+.job-status.running,
+.job-status.analysing { color: var(--accent); }
+.job-status.completed { color: var(--ok); }
+.job-status.failed    { color: var(--danger); }
+.job-status.paused,
+.job-status.interrupted { color: var(--warn, #e0a33c); }
 .job-bar { height: 4px; background: #1c2030; border-radius: 3px; overflow: hidden; }
 .job-bar span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .3s; }
 .job-meta {
@@ -731,6 +761,127 @@ input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.18); }
 .job-actions { display: flex; gap: 6px; margin-top: 9px; }
 .job-actions .btn { height: 28px; padding: 0 10px; font-size: 11.5px; border-radius: 7px; }
 .job-error { margin-top: 7px; font-size: 11px; color: var(--danger); line-height: 1.5; }
+.job-warning { margin-top: 6px; font-size: 11px; color: var(--warn, #e0a33c); line-height: 1.5; }
+.job-plan {
+  margin-top: 7px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  line-height: 1.5;
+}
+
+/* Create - source analysis */
+
+.create-source {
+  padding: 11px 12px;
+  margin-bottom: 16px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.create-source-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.create-source-head strong {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.analysis-grid { display: flex; flex-direction: column; gap: 3px; }
+.analysis-grid .arow {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.analysis-grid .arow b {
+  font-family: var(--mono);
+  font-weight: 500;
+  color: var(--text);
+  text-align: right;
+}
+/* Create - AI block */
+
+.ai-block {
+  margin: 16px 0;
+  padding: 11px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.ai-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.ai-head strong { font-size: 12.5px; }
+.ai-state {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--warn);
+}
+.ai-state.ready { color: var(--ok); }
+.ai-block .field-row:last-of-type { margin-bottom: 0; }
+.engine-progress {
+  margin-top: 9px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--accent);
+}
+
+details.advanced {
+  margin: 14px 0;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+details.advanced summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+  user-select: none;
+}
+details.advanced summary:hover { color: var(--text); }
+details.advanced[open] summary { margin-bottom: 10px; }
+
+/* Create - Auto block */
+
+.auto-block {
+  margin-bottom: 16px;
+  padding: 11px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.auto-block .btn.full { margin-top: 4px; }
+.auto-explain { margin-top: 10px; }
+.auto-head {
+  margin: 0 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--text-faint);
+}
+.auto-line {
+  margin: 0 0 5px;
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.auto-line.warn { border-left-color: var(--warn); color: var(--warn); }
+
+.field-help.warn { color: var(--warn, #e0a33c); }
+#capabilityText { white-space: pre-line; line-height: 1.6; }
+.recipe-warnings { margin-top: 10px; }
 
 /* Library */
 
@@ -874,6 +1025,7 @@ input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.18); }
   border-radius: var(--radius-sm);
   margin-bottom: 12px;
 }
+.dep-row[hidden] { display: none; }
 .dep-row strong { font-size: 13px; }
 .dep-actions { display: flex; gap: 6px; }
 .dep-actions .btn { height: 32px; padding: 0 12px; font-size: 12px; }

@@ -17,7 +17,7 @@
  * Services this app needs, derived from the source rather than assumed:
  *   - Node.js + npm ....... to install dependencies and run Electron
  *   - Electron ............ the app itself; there is no separate backend
- *   - ffmpeg/ffprobe ...... optional, only for the Export tab (via ffmpeg-static)
+ *   - ffmpeg/ffprobe ...... optional, only for Create renders (via ffmpeg-static)
  *   - yt-dlp .............. optional, downloaded by the app on request
  *
  * There is no HTTP server, no database and no container in this project, so the
@@ -440,7 +440,7 @@ function ensureElectronBinary() {
   });
 }
 
-/** Optional: only the Export tab needs ffmpeg, so this never blocks startup. */
+/** Optional: only Create renders need ffmpeg, so this never blocks startup. */
 function verifyFfmpeg() {
   const dir = path.join(NODE_MODULES, 'ffmpeg-static');
   if (!fs.existsSync(dir)) return { ok: false, reason: 'ffmpeg-static is not installed' };
@@ -456,12 +456,18 @@ function verifyFfmpeg() {
  * Launch
  * ------------------------------------------------------------------ */
 
-function startApp() {
+/**
+ * Development mode is opt-in. A normal double-click of RUN_VISIONANCE.cmd must
+ * launch the app the way a user expects - no detached DevTools window - while
+ * `RUN_VISIONANCE.cmd --dev` (and `npm run dev`) still gives a developer one.
+ */
+function startApp(opts = {}) {
   ensureDirs();
   const logStream = fs.createWriteStream(LOG_FILE, { flags: 'w' });
   logStream.write(`# Visionance started ${new Date().toISOString()}\n`);
 
-  const child = spawn(electronBinaryPath(), ['.'], {
+  const electronArgs = opts.dev ? ['.', '--dev'] : ['.'];
+  const child = spawn(electronBinaryPath(), electronArgs, {
     cwd: ROOT,
     windowsHide: false,
     stdio: ['ignore', 'pipe', 'pipe']
@@ -557,7 +563,7 @@ function diagnoseEarlyExit(result, capture) {
  * Commands
  * ------------------------------------------------------------------ */
 
-async function cmdRun({ doctorOnly = false } = {}) {
+async function cmdRun({ doctorOnly = false, dev = false } = {}) {
   banner();
 
   const existing = checkExistingInstance();
@@ -642,7 +648,7 @@ async function cmdRun({ doctorOnly = false } = {}) {
   }
 
   step('Starting Visionance');
-  const { child, logStream, capture } = startApp();
+  const { child, logStream, capture } = startApp({ dev });
   acquireLock(child.pid);
 
   const cleanup = () => { releaseLock(); try { logStream.end(); } catch { /* ignore */ } };
@@ -785,7 +791,7 @@ async function main() {
     if (args.includes('--stop')) return cmdStop();
     if (args.includes('--reset')) return await cmdReset();
     if (args.includes('--doctor')) return await cmdRun({ doctorOnly: true });
-    return await cmdRun();
+    return await cmdRun({ dev: args.includes('--dev') });
   } catch (err) {
     fail('The launcher hit an unexpected problem.', [String(err && err.message)], [
       'Run RESET_VISIONANCE.cmd and try again',

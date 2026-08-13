@@ -51,9 +51,13 @@
       <div class="stage-inner" id="stageInner">
         <canvas id="glCanvas" class="hidden"></canvas>
 
-        <!-- Hidden media elements: the canvas is what the user sees -->
-        <video id="video" playsinline></video>
-        <audio id="audio"></audio>
+        <!-- Hidden media elements: the canvas is what the user sees.
+             preload="auto" matters for the separate audio track of a split
+             stream: with the default, a paused audio element fetches metadata
+             and then suspends the network, so if it ever fails to start it
+             never loads the rest and the video plays silently. -->
+        <video id="video" playsinline preload="auto"></video>
+        <audio id="audio" preload="auto"></audio>
 
         <div class="stage-empty" id="stageEmpty">
           <div class="empty-art">
@@ -114,6 +118,7 @@
               <span class="dot"></span> Enhancement on
             </button>
             <button class="pill ghost" id="compareBtn" title="Split compare (Ctrl+D)">Compare</button>
+            <button class="pill ghost" id="sendToCreateBtn" title="Create from this video (Ctrl+E)">Create from this</button>
             <span class="res-badge" id="resBadge">—</span>
           </div>
 
@@ -138,9 +143,10 @@
     <!-- ───────────────────────── Side panel ───────────────────────── -->
     <aside class="panel" id="panel">
       <nav class="tabs" role="tablist">
-        <button class="tab active" data-tab="presets">Presets</button>
+        <button class="tab active" data-tab="presets">Watch</button>
         <button class="tab" data-tab="adjust">Adjust</button>
-        <button class="tab" data-tab="export">Export</button>
+        <button class="tab" data-tab="create">Create</button>
+        <button class="tab" data-tab="queue">Queue</button>
         <button class="tab" data-tab="library">Library</button>
       </nav>
 
@@ -149,6 +155,18 @@
         <!-- Presets -->
         <section class="tab-page active" data-page="presets">
           <div class="preset-grid" id="presetGrid"></div>
+
+          <div class="field-row">
+            <label for="watchQuality">Playback quality</label>
+            <select id="watchQuality" class="select">
+              <option value="auto" selected>Auto</option>
+              <option value="performance">Performance</option>
+              <option value="balanced">Balanced</option>
+              <option value="quality">Quality</option>
+              <option value="maximum">Maximum</option>
+            </select>
+          </div>
+          <p class="field-help">How hard realtime enhancement is allowed to work. Auto keeps motion smooth and raises quality only when there is headroom. This never affects Create's offline AI quality.</p>
 
           <div class="field-row">
             <label for="scaleSelect">Render resolution</label>
@@ -181,43 +199,211 @@
           <button class="btn btn-ghost full" id="resetParamsBtn">Reset to preset</button>
         </section>
 
-        <!-- Export -->
-        <section class="tab-page" data-page="export">
+        <!-- Create -->
+        <section class="tab-page" data-page="create">
           <div class="export-intro">
-            <h3>Render a permanent copy</h3>
-            <p>Bakes the current look into a new file with ffmpeg. Playback stays live and free — use this only when you need a file to share.</p>
+            <h3>Finish a file for upload</h3>
+            <p>Renders a new file with ffmpeg: repair, rescale, reframe, grade, audio, encode. This is a different engine from the live preview, so the result is based on your look rather than pixel-identical to it.</p>
+          </div>
+
+          <div class="create-source" id="createSource">
+            <div class="create-source-head">
+              <strong id="createSourceTitle">No source selected</strong>
+              <button class="link-btn" id="analyseBtn">Analyse</button>
+            </div>
+            <div class="analysis-grid" id="analysisGrid"></div>
+            <p class="field-help" id="analysisNote"></p>
+          </div>
+
+          <div class="auto-block" id="autoBlock">
+            <div class="ai-head">
+              <strong>Auto</strong>
+              <span class="ai-state" id="autoState">Analyse a source first</span>
+            </div>
+            <div class="field-row">
+              <label for="autoProfile">Content</label>
+              <select id="autoProfile" class="select"></select>
+            </div>
+            <div class="field-row">
+              <label for="autoIntensity">Intensity</label>
+              <select id="autoIntensity" class="select">
+                <option value="light">Light</option>
+                <option value="balanced" selected>Balanced</option>
+                <option value="strong">Strong</option>
+                <option value="maximum">Maximum</option>
+              </select>
+            </div>
+            <button class="btn btn-accent full" id="autoBuildBtn">Suggest settings</button>
+            <div class="auto-explain" id="autoExplain" hidden></div>
           </div>
 
           <div class="field-row">
-            <label for="exportRes">Output resolution</label>
-            <select id="exportRes" class="select">
+            <label for="createPreset">Export preset</label>
+            <select id="createPreset" class="select"><option value="">Custom…</option></select>
+          </div>
+
+          <div class="field-row">
+            <label for="createPlatform">Target</label>
+            <select id="createPlatform" class="select"></select>
+          </div>
+
+          <div class="field-row">
+            <label for="createRes">Output resolution</label>
+            <select id="createRes" class="select">
               <option value="source">Same as source</option>
-              <option value="720p">1280 × 720</option>
-              <option value="1080p" selected>1920 × 1080</option>
-              <option value="1440p">2560 × 1440</option>
-              <option value="2160p">3840 × 2160 (4K)</option>
+              <option value="platform">From target</option>
+              <option value="1280x720">1280 × 720</option>
+              <option value="1920x1080">1920 × 1080</option>
+              <option value="2560x1440">2560 × 1440</option>
+              <option value="3840x2160">3840 × 2160 (4K)</option>
+            </select>
+          </div>
+
+          <div class="field-row" id="createFramingRow">
+            <label for="createFraming">Reframing</label>
+            <select id="createFraming" class="select">
+              <option value="smart">Smart Reframe (follow the subject)</option>
+              <option value="fill">Centre crop to fill</option>
+              <option value="fit">Fit, blurred background</option>
+              <option value="fit-black">Fit, black bars</option>
+            </select>
+          </div>
+          <p class="field-help" id="createFramingHelp">Smart Reframe tracks motion and visual saliency to keep the important action inside a taller crop. It is not face detection: it follows the moving, in-focus subject, and holds the last good position when it cannot find one. A clip with nothing trackable stays centred and the job says so.</p>
+
+          <div class="ai-block" id="aiBlock">
+            <div class="ai-head">
+              <strong>AI enhancement</strong>
+              <span class="ai-state" id="aiEngineState">Checking…</span>
+            </div>
+
+            <div class="field-row">
+              <label for="createAi">Neural enhancement</label>
+              <select id="createAi" class="select">
+                <option value="off" selected>Off</option>
+                <option value="restore">Restore (same size)</option>
+                <option value="2">Upscale 2×</option>
+                <option value="4">Upscale 4×</option>
+              </select>
+            </div>
+
+            <div class="field-row" id="createAiModelRow" hidden>
+              <label for="createAiModel">Model</label>
+              <select id="createAiModel" class="select">
+                <option value="auto">Auto</option>
+                <option value="general">General</option>
+                <option value="animation">Animation</option>
+              </select>
+            </div>
+            <p class="field-help" id="createAiNote" hidden></p>
+
+            <div class="field-row">
+              <label for="createInterp">Interpolation</label>
+              <select id="createInterp" class="select">
+                <option value="off" selected>Off</option>
+                <option value="classical">Classical (duplicate frames)</option>
+                <option value="ai">AI (RIFE)</option>
+              </select>
+            </div>
+
+            <div class="field-row switch-row" id="createSceneRow" hidden>
+              <label for="createScene">Scene-cut protection</label>
+              <input type="checkbox" id="createScene" class="switch" checked>
+            </div>
+            <p class="field-help" id="createSceneHelp" hidden>Detects hard cuts and interpolates each shot separately, so two different shots are never blended into one another.</p>
+
+            <button class="btn btn-accent full" id="installEnginesBtn" hidden>Install AI engines</button>
+            <div class="engine-progress" id="engineProgress" hidden></div>
+          </div>
+
+          <div class="field-row">
+            <label for="createFps">Frame rate</label>
+            <select id="createFps" class="select">
+              <option value="source">Same as source</option>
+              <option value="24">24 fps</option>
+              <option value="25">25 fps</option>
+              <option value="30">30 fps</option>
+              <option value="48">48 fps</option>
+              <option value="50">50 fps</option>
+              <option value="60">60 fps</option>
+              <option value="120">120 fps</option>
+            </select>
+          </div>
+          <p class="field-help" id="createFpsHelp">Frames are duplicated or dropped to hit the target. Choose AI interpolation above to generate genuinely new intermediate frames.</p>
+
+          <details class="advanced">
+            <summary>Advanced</summary>
+            <div class="field-row">
+              <label for="createGpu">GPU</label>
+              <select id="createGpu" class="select">
+                <option value="auto">Auto</option>
+              </select>
+            </div>
+            <div class="field-row">
+              <label for="createTile">Tile size</label>
+              <select id="createTile" class="select">
+                <option value="">Auto (shrinks on out-of-memory)</option>
+                <option value="512">512</option>
+                <option value="256">256</option>
+                <option value="128">128</option>
+                <option value="64">64</option>
+              </select>
+            </div>
+            <div class="field-row">
+              <label for="createSceneThreshold">Scene-cut sensitivity <span class="val" id="createSceneThresholdVal">0.35</span></label>
+              <input type="range" id="createSceneThreshold" min="0.05" max="0.9" step="0.05" value="0.35">
+            </div>
+            <p class="field-help" id="createModelDetail">—</p>
+          </details>
+
+          <div class="field-row">
+            <label for="createEncoder">Encoder</label>
+            <select id="createEncoder" class="select">
+              <option value="auto">Automatic (prefer hardware)</option>
             </select>
           </div>
 
           <div class="field-row">
-            <label for="exportEncoder">Encoder</label>
-            <select id="exportEncoder" class="select">
-              <option value="libx264">H.264 (CPU, most compatible)</option>
-            </select>
-          </div>
-
-          <div class="field-row">
-            <label for="exportQuality">Quality <span class="val" id="exportQualityVal">70</span></label>
-            <input type="range" id="exportQuality" min="10" max="100" step="1" value="70">
+            <label for="createQuality">Quality <span class="val" id="createQualityVal">70</span></label>
+            <input type="range" id="createQuality" min="10" max="100" step="1" value="70">
           </div>
 
           <div class="field-row switch-row">
-            <label for="exportAudio">Keep audio</label>
-            <input type="checkbox" id="exportAudio" class="switch" checked>
+            <label for="createUseLook">Apply the look from the player</label>
+            <input type="checkbox" id="createUseLook" class="switch" checked>
           </div>
 
-          <button class="btn btn-accent full" id="startExportBtn">Choose destination &amp; render</button>
+          <div class="field-row switch-row">
+            <label for="createAudio">Keep audio</label>
+            <input type="checkbox" id="createAudio" class="switch" checked>
+          </div>
 
+          <div class="field-row switch-row">
+            <label for="createLoudness">Normalise loudness (−14 LUFS)</label>
+            <input type="checkbox" id="createLoudness" class="switch">
+          </div>
+
+          <div class="field-row switch-row">
+            <label for="createChunked">Chunked render (pausable)</label>
+            <input type="checkbox" id="createChunked" class="switch">
+          </div>
+          <p class="field-help">Renders in segments and joins them losslessly. Slightly larger files, but the job can be paused and resumed at a segment boundary.</p>
+
+          <button class="btn btn-accent full" id="startCreateBtn">Choose destination &amp; render</button>
+          <div class="recipe-warnings" id="recipeWarnings"></div>
+
+          <div class="save-preset">
+            <input type="text" id="recipeName" placeholder="Save these settings as…" maxlength="60">
+            <button class="btn btn-ghost" id="saveRecipeBtn">Save</button>
+          </div>
+          <div class="recent-list" id="savedRecipeList"></div>
+        </section>
+
+        <!-- Queue -->
+        <section class="tab-page" data-page="queue">
+          <div class="library-head">
+            <h3>Render queue</h3>
+            <button class="link-btn" id="clearJobsBtn">Clear finished</button>
+          </div>
           <div class="jobs" id="jobList"></div>
         </section>
 
@@ -266,27 +452,73 @@
           <div class="field-row">
             <label for="maxHeight">Maximum stream height</label>
             <select id="maxHeight" class="select">
+              <option value="0" selected>Auto (match this display)</option>
               <option value="720">720p (lightest)</option>
-              <option value="1080" selected>1080p</option>
+              <option value="1080">1080p</option>
               <option value="1440">1440p</option>
               <option value="2160">2160p</option>
-              <option value="0">No limit</option>
             </select>
           </div>
-          <p class="field-help">Visionance rebuilds detail on the GPU, so a clean 1080p stream usually looks better — and starts instantly — compared to waiting on a 4K one.</p>
+          <p class="field-help">Auto picks the smallest stream that still fills your window, which is usually what makes playback smooth. Visionance rebuilds detail on the GPU, so a clean 1080p stream often looks better than a starved 4K one. Setting a value here overrides Auto exactly.</p>
 
           <div class="field-row">
-            <label for="cookieBrowser">Use cookies from</label>
-            <select id="cookieBrowser" class="select">
-              <option value="">None</option>
+            <label for="authMode">Sign-in for restricted videos</label>
+            <select id="authMode" class="select">
+              <option value="none">Public videos only</option>
+              <option value="browser">Cookies from a browser</option>
+              <option value="file">cookies.txt file</option>
+            </select>
+          </div>
+          <p class="field-help">Public links are always resolved anonymously first. Whatever you choose here is only used if a site actually says the video needs an account you already have.</p>
+
+          <div class="field-row" id="authBrowserRow" hidden>
+            <label for="authBrowser">Browser</label>
+            <select id="authBrowser" class="select">
               <option value="chrome">Chrome</option>
               <option value="edge">Edge</option>
               <option value="firefox">Firefox</option>
               <option value="brave">Brave</option>
+              <option value="chromium">Chromium</option>
+              <option value="opera">Opera</option>
+              <option value="vivaldi">Vivaldi</option>
               <option value="safari">Safari</option>
             </select>
           </div>
-          <p class="field-help">Needed for age-restricted or members-only videos you already have access to.</p>
+
+          <div class="dep-row" id="authFileRow" hidden>
+            <div>
+              <strong>cookies.txt</strong>
+              <p class="muted" id="authFileStatus">No file chosen.</p>
+            </div>
+            <div class="dep-actions">
+              <button class="btn btn-ghost" id="pickCookiesBtn">Choose…</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-block">
+          <h3>JavaScript runtime</h3>
+          <div class="dep-row">
+            <div>
+              <strong>For yt-dlp</strong>
+              <p class="muted" id="runtimeStatus">Checking…</p>
+            </div>
+            <div class="dep-actions">
+              <button class="btn btn-ghost" id="installRuntimeBtn">Install</button>
+            </div>
+          </div>
+          <p class="field-help">Modern yt-dlp needs a JavaScript runtime to read some sites. Visionance uses one it finds on your machine; this only installs a private copy if there is none.</p>
+        </section>
+
+        <section class="settings-block">
+          <h3>AI engines</h3>
+          <div id="engineList"></div>
+          <p class="field-help">Neural upscaling and frame interpolation run locally on your GPU through Vulkan — no Python, no CUDA toolkit, nothing to configure. Engines are downloaded into your user data folder, not the app folder.</p>
+        </section>
+
+        <section class="settings-block">
+          <h3>This machine</h3>
+          <p class="muted small" id="capabilityText">Checking…</p>
         </section>
 
         <section class="settings-block">
@@ -347,13 +579,14 @@
           <li><strong>Finish</strong> — debanding, local contrast, tone curve and colour.</li>
         </ol>
         <p>Nothing is written to disk and nothing is re-encoded, so a 1080p stream can look close to a native 4K file without the 20&nbsp;GB download or the wait.</p>
-        <p>When you do need a file — for editing, uploading or sending to someone — the <strong>Export</strong> tab renders the same look with ffmpeg.</p>
+        <p>When you need a file — for uploading or sending to someone — the <strong>Create</strong> tab renders one with ffmpeg: repair, rescale, reframe for Shorts or Reels, grade, audio and a verified encode. That is a different engine from this live preview, so treat the result as based on your look rather than identical to it.</p>
       </div>
     </div>
   </div>
 
 </div>
 
+<script src="js/playback-stats.js"></script>
 <script src="js/shaders.js"></script>
 <script src="js/engine.js"></script>
 <script src="js/presets.js"></script>

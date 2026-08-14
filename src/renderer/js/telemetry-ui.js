@@ -297,7 +297,17 @@
     if (sample) {
       const gpu = sample.gpu;
       if (gpu) {
-        if (gpu.name) rows.push(['Device', gpu.name, 'device']);
+        /*
+         * "Render GPU", not "Device".
+         *
+         * This is the adapter nvidia-smi reports — the one an offline render
+         * uses. The status bar shows the adapter the *realtime* WebGL context
+         * is on, and on a laptop those are routinely different: a discrete GPU
+         * here and the integrated one there. Two readouts labelled "Device"
+         * and "GPU" showing different names read as the app contradicting
+         * itself, so each says which job it is describing.
+         */
+        if (gpu.name) rows.push(['Render GPU', gpu.name, 'device']);
         if (Number.isFinite(gpu.utilisationPercent)) {
           rows.push(['Utilisation', `${gpu.utilisationPercent}%`, 'primary']);
         }

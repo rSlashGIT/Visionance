@@ -735,6 +735,22 @@ function normaliseInfo(info, pageUrl, opts) {
     useSplit = false;
     notes.push('A single combined stream of the same quality was available, so it was used.');
   }
+  /*
+   * The audio-recovery ladder's last rung.
+   *
+   * When a split pair's audio leg has been refused twice, resolution stops
+   * being the thing that matters: a combined stream cannot lose its sound,
+   * because there is no second request to refuse. The caller only asks for
+   * this after a real failure, and it is told what it gave up.
+   */
+  if (opts.preferMuxed && useSplit && muxed) {
+    useSplit = false;
+    notes.push(
+      muxedHeight && splitHeight && muxedHeight < splitHeight
+        ? `A combined ${muxedHeight}p stream was used so the sound is part of the video.`
+        : 'A combined stream was used so the sound is part of the video.'
+    );
+  }
 
   const video = slimFormat(useSplit ? videoOnly : muxed, baseHeaders);
   const audio = useSplit ? slimFormat(audioOnly, baseHeaders) : null;

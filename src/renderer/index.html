@@ -79,44 +79,82 @@
            here rather than in the inspector so the workspace reads the way the
            work does — context on the left, the thing being made on the right. -->
       <div class="col-scope" data-scope="create">
+        <!-- ───────────── One source system ─────────────────────────────
+             Four ways in — a file, a URL, whatever Watch is playing, or a
+             recent — and one authoritative answer: `state.createSource`.
+
+             The picker and the active-source card are the same module in two
+             states, not two competing modules. Once a source is chosen the
+             picker collapses behind "Change source", because a panel that
+             keeps offering to replace what you just chose reads as though
+             nothing was chosen. -->
         <section class="col-module" id="createSource">
           <div class="col-head">
             <h3>Create source</h3>
             <span class="col-tag" id="createKindTag"></span>
           </div>
-          <div class="col-ident">
-            <div class="thumb poster" id="createThumb"></div>
-            <div class="col-ident-text">
+
+          <!-- ACTIVE SOURCE. Identical structure for local and online; only
+               the badge and the facts differ. -->
+          <div class="source-card create-source-card" id="createSourceCard" hidden>
+            <div class="thumb md" id="createThumb"></div>
+            <div class="source-card-body">
               <strong id="createSourceTitle">No source selected</strong>
-              <span id="createSourceSub">Choose a video, paste a URL, or use whatever Watch is playing.</span>
+              <span class="source-kind" id="createSourceKind"></span>
+              <div class="source-card-meta" id="createSourceSub"></div>
             </div>
           </div>
+          <button class="btn btn-ghost full" id="createChangeSourceBtn" hidden>Change source</button>
 
-          <div class="create-source-actions">
-            <button class="btn btn-ghost" id="createOpenFileBtn">Choose video</button>
-            <button class="btn btn-ghost" id="createUseWatchBtn">Use Watch video</button>
+          <!-- PICKER. The empty state, and what "Change source" reopens. -->
+          <div class="source-picker" id="createSourcePicker">
+            <p class="field-help" id="createPickerHint">Choose what you want to build from.</p>
+            <div class="create-source-actions">
+              <button class="btn btn-secondary" id="createOpenFileBtn">Open file</button>
+              <button class="btn btn-secondary" id="createUrlToggleBtn">Paste URL</button>
+            </div>
+            <button class="link-btn wide" id="createUseWatchBtn">Use Watch source</button>
           </div>
-          <div class="create-source-url">
+
+          <!-- URL ENTRY. Focused, and it stays open on failure so the address
+               the user typed is still there to correct. -->
+          <div class="source-url-entry" id="createUrlPanel" hidden>
+            <label for="createUrlInput">Video URL</label>
             <input id="createUrlInput" class="input" type="text" spellcheck="false"
-                   placeholder="…or paste a video URL" aria-label="Create source URL">
-            <button class="btn btn-ghost" id="createUrlBtn">Load</button>
+                   placeholder="https://…" aria-label="Create source URL">
+            <div class="create-source-actions">
+              <button class="btn btn-accent" id="createUrlBtn">Load source</button>
+              <button class="btn btn-ghost" id="createUrlCancelBtn">Cancel</button>
+            </div>
+            <p class="field-help warn last" id="createUrlError" hidden></p>
           </div>
         </section>
 
-        <section class="col-module">
+        <!-- ───────────── Source analysis ───────────────────────────────
+             Kept in full, but folded: the four facts anyone actually reads
+             stay visible and the other eleven are one disclosure away. This
+             module used to occupy a third of the column permanently. -->
+        <section class="col-module" id="createAnalysisModule">
           <div class="col-head">
             <h3>Source analysis</h3>
             <button class="link-btn" id="analyseBtn">Analyse</button>
           </div>
-          <div class="analysis-grid" id="analysisGrid"></div>
-          <p class="field-help last col-note" id="analysisNote"></p>
+          <div class="analysis-brief" id="analysisBrief"></div>
+          <details class="sub-details" id="analysisDetails">
+            <summary>Details</summary>
+            <div class="analysis-grid" id="analysisGrid"></div>
+            <p class="field-help last col-note" id="analysisNote"></p>
+          </details>
         </section>
 
         <!-- The intake half of the command centre: the same recents the
              Library shows, aimed at Create rather than at the player. Picking
              one here sets the *Create* source and leaves Watch alone, which is
              the whole point of the two being separate. -->
-        <section class="col-module">
+        <!-- Recents stay useful and stop competing: once a source is active
+             this module quietens down rather than presenting five equally
+             weighted alternatives to the thing you just picked. -->
+        <section class="col-module quiet" id="createRecentsModule">
           <div class="col-head">
             <h3>Recent sources</h3>
             <span class="col-tag" id="createRecentsTag"></span>
@@ -148,6 +186,15 @@
         <video id="createVideo" playsinline preload="metadata"></video>
         <audio id="createAudio" preload="auto"></audio>
 
+        <!-- A static guide, not a preview of the render.
+             It draws the shape the output will be over the source picture, and
+             nothing else: no scaling, no enhancement, no tracking. Smart
+             Reframe moves this box during the render, so the guide says where
+             a centred crop would sit and labels itself as a guide. -->
+        <div class="crop-guide" id="createCropGuide" hidden aria-hidden="true">
+          <div class="crop-guide-box" id="createCropGuideBox"><span id="createCropGuideLabel"></span></div>
+        </div>
+
         <div class="preview-badge" id="createPreviewBadge" hidden>
           <span>Source preview</span>
           <em>Final processing is applied during render</em>
@@ -164,8 +211,10 @@
           <p>Pick a video, paste a URL, or use whatever Watch is playing. It appears
              here so you can see exactly what you are about to render. Final
              processing is applied during the render, not to this preview.</p>
+          <!-- The same two words as the picker in the source column: one
+               action should not have two names on one screen. -->
           <div class="empty-actions">
-            <button class="btn btn-accent" id="createEmptyOpenBtn">Choose video</button>
+            <button class="btn btn-accent" id="createEmptyOpenBtn">Open file</button>
             <button class="btn btn-ghost" id="createEmptyWatchBtn">Use Watch source</button>
           </div>
         </div>
@@ -186,11 +235,11 @@
             </svg>
           </div>
           <h2>Open a video</h2>
-          <p>Drop a file here, or paste a link into the source bar in Watch.
-             Visionance upscales and cleans it up live on your GPU — nothing is
-             downloaded, nothing is re-encoded.</p>
+          <!-- The URL box is six inches to the right in the Source module, so
+               this does not repeat the instruction. -->
+          <p>Local file or supported URL. Visionance enhances playback in realtime.</p>
           <div class="empty-actions">
-            <button class="btn btn-accent" id="emptyOpenBtn">Open a file</button>
+            <button class="btn btn-accent" id="emptyOpenBtn">Open file</button>
             <button class="btn btn-ghost" id="emptyDemoBtn">How it works</button>
           </div>
         </div>
@@ -431,6 +480,45 @@
             </div>
           </div>
 
+          <!-- ───────────── AUTO CONFIGURE (Watch) ───────────────────────────
+               The same product idea as Create's, over a completely different
+               machine. This configures realtime state only: a Look, the
+               realtime quality policy, adaptive quality and the render scale.
+
+               It deliberately offers no frame rate and no aspect ratio. Watch
+               has no realtime RIFE and no realtime reframe, so a control for
+               either here would be a control that does nothing. -->
+          <div class="module auto-block" id="watchAutoBlock">
+            <div class="module-head">
+              <h3>Auto configure</h3>
+              <span class="ai-state" id="watchAutoState">No source</span>
+            </div>
+            <p class="module-purpose">Reads this video and chooses the best safe realtime
+              settings for this machine.</p>
+            <div class="module-body">
+              <div class="field-row">
+                <label for="watchAutoProfile">Content</label>
+                <select id="watchAutoProfile" class="select">
+                  <option value="auto" selected>Detect from the source</option>
+                  <option value="film">Film / Cinematic</option>
+                  <option value="animation">Animation / Anime</option>
+                  <option value="action">Sports / Fast motion</option>
+                  <option value="gaming">Gaming</option>
+                  <option value="lowlight">Low light</option>
+                  <option value="screencast">Screencast / Text</option>
+                  <option value="dialogue">Dialogue / Podcast</option>
+                </select>
+              </div>
+              <button class="btn btn-accent full lg" id="watchAutoBtn">Auto configure</button>
+              <p class="auto-stage" id="watchAutoStage" hidden></p>
+              <div class="auto-result" id="watchAutoResult" hidden></div>
+              <details class="sub-details" id="watchAutoWhy" hidden>
+                <summary>Why these settings?</summary>
+                <div class="auto-explain" id="watchAutoExplain"></div>
+              </details>
+            </div>
+          </div>
+
           <div class="module">
             <div class="module-head">
               <h3>Looks</h3>
@@ -550,40 +638,23 @@
             <div class="intro-stats" id="createHomeStats"></div>
           </div>
 
-          <!-- AUTO -->
-          <div class="module auto-block" id="autoBlock">
-            <div class="module-head">
-              <h3>Auto</h3>
-              <span class="ai-state" id="autoState">No source</span>
-            </div>
-            <p class="module-purpose">Reads the source and proposes a recipe, then says why.</p>
-            <div class="module-body">
-              <div class="field-row">
-                <label for="autoProfile">Content</label>
-                <select id="autoProfile" class="select"></select>
-              </div>
-              <div class="field-row">
-                <label for="autoIntensity">Intensity</label>
-                <select id="autoIntensity" class="select">
-                  <option value="light">Light</option>
-                  <option value="balanced" selected>Balanced</option>
-                  <option value="strong">Strong</option>
-                  <option value="maximum">Maximum</option>
-                </select>
-              </div>
-              <button class="btn btn-secondary full" id="autoBuildBtn">Suggest settings</button>
-              <div class="auto-explain" id="autoExplain" hidden></div>
-            </div>
-          </div>
+          <!-- ═══════════════ THE SIMPLE PATH ═══════════════════════════════
+               Four questions a person who has never heard of Real-ESRGAN can
+               answer — where it is going, what shape, how big, how fast — and
+               one button that works out the rest.
 
-          <!-- OUTPUT -->
-          <details class="group" id="groupOutput" open>
-            <summary><span class="module-index">01</span>Output <span class="gtag" id="tagOutput"></span></summary>
-            <div class="group-body">
-              <div class="field-row">
-                <label for="createPreset">Export preset</label>
-                <select id="createPreset" class="select"><option value="">Custom…</option></select>
-              </div>
+               These are not a simplified copy of the advanced controls. They
+               are the *same* controls, moved to the top: there is one aspect
+               select, one resolution select, one frame-rate select in this
+               application, and both paths write the same recipe. -->
+          <div class="module simple-block" id="createBasics">
+            <div class="module-head">
+              <h3>Output</h3>
+              <span class="module-tag" id="tagOutput"></span>
+            </div>
+            <p class="module-purpose">What the finished file has to be. Everything you choose
+              here is a requirement, not a suggestion.</p>
+            <div class="module-body">
               <div class="field-row">
                 <label for="createPlatform">Target</label>
                 <select id="createPlatform" class="select"></select>
@@ -628,7 +699,100 @@
                          aria-label="Output height">
                 </div>
               </div>
+
+              <div class="field-row">
+                <label for="createFps">Frame rate</label>
+                <select id="createFps" class="select">
+                  <option value="source">Same as source</option>
+                  <option value="24">24 fps</option>
+                  <option value="25">25 fps</option>
+                  <option value="30">30 fps</option>
+                  <option value="48">48 fps</option>
+                  <option value="50">50 fps</option>
+                  <option value="60">60 fps</option>
+                  <option value="120">120 fps</option>
+                </select>
+              </div>
               <p class="field-help last" id="createGeometryNote"></p>
+            </div>
+          </div>
+
+          <!-- AUTO CONFIGURE -->
+          <div class="module auto-block" id="autoBlock">
+            <div class="module-head">
+              <h3>Auto configure</h3>
+              <span class="ai-state" id="autoState">No source</span>
+            </div>
+            <p class="module-purpose" id="autoPurpose">Visionance reads the source and chooses the
+              processing to reach what you asked for above.</p>
+            <div class="module-body">
+              <!-- Deliberately one step below the render action: Auto matters,
+                   but committing to a render is the decision that costs
+                   something. -->
+              <button class="btn btn-accent full" id="autoBuildBtn">Auto configure</button>
+              <p class="auto-stage" id="autoStage" hidden></p>
+
+              <!-- What was actually chosen, read back off the recipe that was
+                   produced. Never a template, never a wish. -->
+              <div class="auto-result" id="autoResult" hidden></div>
+
+              <!-- Anything that could not be done truthfully, with the action
+                   that would fix it. -->
+              <div class="auto-unmet" id="autoUnmet" hidden></div>
+
+              <details class="sub-details" id="autoWhy" hidden>
+                <summary>Why these settings?</summary>
+                <div class="auto-explain" id="autoExplain"></div>
+              </details>
+            </div>
+          </div>
+
+          <!-- ═══════════════ ADVANCED ══════════════════════════════════════
+               The full workstation, unchanged and complete. Nothing above is a
+               second copy of anything in here: the simple path moves four
+               controls to the top and adds one button, and both write the same
+               recipe through the same code. -->
+          <details class="advanced advanced-shell" id="createAdvancedShell">
+            <summary>Advanced</summary>
+            <div class="advanced-shell-body">
+
+          <!-- AUTO TUNING -->
+          <div class="module" id="autoTuning">
+            <div class="module-head">
+              <h3>Auto tuning</h3>
+            </div>
+            <p class="module-purpose">How Auto Configure reads this source, and how much time it
+              may spend.</p>
+            <div class="module-body">
+              <div class="field-row">
+                <label for="autoProfile">Content</label>
+                <select id="autoProfile" class="select"></select>
+              </div>
+              <div class="field-row">
+                <label for="autoIntensity">Intensity</label>
+                <select id="autoIntensity" class="select">
+                  <option value="light">Light</option>
+                  <option value="balanced" selected>Balanced</option>
+                  <option value="strong">Strong</option>
+                  <option value="maximum">Maximum</option>
+                </select>
+              </div>
+              <p class="field-help last">Balanced aims for a sensible quality-to-time trade.
+                Higher intensities let Auto choose heavier processing.</p>
+            </div>
+          </div>
+
+          <!-- OUTPUT -->
+          <details class="group" id="groupOutput">
+            <summary><span class="module-index">01</span>Export preset <span class="gtag" id="tagPreset"></span></summary>
+            <div class="group-body">
+              <div class="field-row">
+                <label for="createPreset">Export preset</label>
+                <select id="createPreset" class="select"><option value="">Custom…</option></select>
+              </div>
+              <p class="field-help last">A preset writes the same recipe fields the controls
+                above and below do. Target, aspect ratio, resolution and frame rate stay where
+                you set them at the top.</p>
             </div>
           </details>
 
@@ -711,19 +875,10 @@
           <details class="group" id="groupMotion">
             <summary><span class="module-index">04</span>Motion <span class="gtag" id="tagMotion"></span></summary>
             <div class="group-body">
-              <div class="field-row">
-                <label for="createFps">Frame rate</label>
-                <select id="createFps" class="select">
-                  <option value="source">Same as source</option>
-                  <option value="24">24 fps</option>
-                  <option value="25">25 fps</option>
-                  <option value="30">30 fps</option>
-                  <option value="48">48 fps</option>
-                  <option value="50">50 fps</option>
-                  <option value="60">60 fps</option>
-                  <option value="120">120 fps</option>
-                </select>
-              </div>
+              <!-- The frame rate itself is one of the four things a simple user
+                   chooses, so the control lives at the top of the panel. This
+                   section owns *how* that rate is reached. -->
+              <p class="field-help" id="createMotionTargetNote"></p>
               <div class="field-row">
                 <label for="createInterp">Interpolation</label>
                 <select id="createInterp" class="select">
@@ -765,9 +920,16 @@
           <details class="group" id="groupAudio">
             <summary><span class="module-index">06</span>Audio <span class="gtag" id="tagAudio"></span></summary>
             <div class="group-body">
+              <!-- Deliberately not `createAudio`: that id belongs to the
+                   Create preview's own <audio> element up in the stage, and a
+                   second element wearing it made getElementById return the
+                   media element instead of this switch. The switch was then
+                   never read, so every render dropped its audio and the
+                   processing summary said "No audio" about a file that had
+                   some. One id, one element. -->
               <div class="field-row switch-row">
-                <label for="createAudio">Keep audio</label>
-                <input type="checkbox" id="createAudio" class="switch" checked>
+                <label for="createKeepAudio">Keep audio</label>
+                <input type="checkbox" id="createKeepAudio" class="switch" checked>
               </div>
               <div class="field-row switch-row">
                 <label for="createLoudness">Normalise loudness (−14 LUFS)</label>
@@ -828,6 +990,10 @@
             </div>
             <div class="recent-list spaced" id="savedRecipeList"></div>
           </div>
+
+            </div>
+          </details>
+          <!-- ═══════════════ end Advanced ═════════════════════════════════ -->
 
           <!-- ACTION. One processing summary, one primary action, and it is
                the last thing in the page so it can hold the foot of the

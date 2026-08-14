@@ -35,6 +35,7 @@ const binaries = require('./binaries');
 const ytdlp = require('./ytdlp');
 const recipes = require('./recipe');
 const autoRecipe = require('./auto-recipe');
+const watchAuto = require('./watch-auto');
 const creatorPresets = require('./creator-presets');
 const capabilities = require('./capabilities');
 const analyzer = require('./media-analyzer');
@@ -899,6 +900,10 @@ function registerIpc() {
     const startedAt = Date.now();
     const resolved = await ytdlp.resolveStream(bins.ytdlp, pageUrl, {
       maxHeight: decision.maxHeight,
+      // Only ever set by the audio-recovery ladder, after a split pair's audio
+      // leg has actually been refused. It trades resolution for a stream whose
+      // sound cannot be refused separately.
+      preferMuxed: !!opts.preferMuxed,
       // Watch is racing a clock: it wants the smallest rendition that covers
       // the window, in the codec most likely to decode in hardware. Offline
       // renders take the opposite view and keep the default 'quality'.
@@ -1110,15 +1115,14 @@ function registerIpc() {
     presets: creatorPresets.list()
   }));
 
-  handle('auto:build', async (_e, request = {}) => {
-    if (!request.analysis) {
-      throw new VisionanceError(CODES.INVALID_REQUEST, {
-        message: 'Analyse the source before using Auto.'
-      });
-    }
-    // Auto must know what is actually installed so it can decline honestly.
+  /**
+   * What Auto is allowed to promise on this machine.
+   * Asked fresh every time: an engine installed two minutes ago must change
+   * the answer without a restart.
+   */
+  async function autoEngineAvailability() {
     const status = await engines.statusAll();
-    const available = {
+    return {
       realesrgan: status.realesrgan && status.realesrgan.status === 'ready',
       rife: status.rife && status.rife.status === 'ready',
       // Smart Reframe needs no model; it needs ffmpeg, which Create needs anyway.
@@ -1128,6 +1132,40 @@ function registerIpc() {
       // face tracking on a machine that has none.
       semanticReframe: semanticModels ? semanticModels.status().status === 'ready' : false
     };
+  }
+
+  /**
+   * The hardware facts Auto is allowed to reason about. Only ever used to
+   * reduce what Auto asks for, so an unknown GPU costs quality, never
+   * stability.
+   */
+  async function autoMachineProfile() {
+    let rep = null;
+    try {
+      rep = await capabilities.report({ bins: binPaths() });
+    } catch { /* a missing report is a legitimate answer */ }
+    const gpus = (rep && rep.gpus) || [];
+    // The strongest adapter the machine reports is the one a render will use.
+    let tier = 'unknown';
+    for (const gpu of gpus) {
+      const t = watchAuto.classifyGpu(gpu.name);
+      if (t === 'discrete') { tier = 'discrete'; break; }
+      if (t === 'integrated' && tier !== 'discrete') tier = 'integrated';
+    }
+    return {
+      gpuTier: tier,
+      gpuName: gpus.length ? gpus[0].name : null,
+      cores: rep && rep.cpu ? rep.cpu.cores : null,
+      memoryBytes: rep && rep.memory ? rep.memory.totalBytes : null
+    };
+  }
+
+  handle('auto:build', async (_e, request = {}) => {
+    if (!request.analysis) {
+      throw new VisionanceError(CODES.INVALID_REQUEST, {
+        message: 'Analyse the source before using Auto.'
+      });
+    }
     const result = autoRecipe.buildAutoRecipe({
       analysis: request.analysis,
       platform: request.platform || 'custom',
@@ -1135,10 +1173,56 @@ function registerIpc() {
       intensity: request.intensity || 'balanced',
       outputPath: request.outputPath || null,
       preferences: request.preferences || {},
-      engines: available
+      locks: request.locks || null,
+      machine: await autoMachineProfile(),
+      engines: await autoEngineAvailability()
     });
     return ok(result);
   });
+
+  /**
+   * AUTO CONFIGURE (Create).
+   *
+   * The same decision engine as `auto:build`, entered from the product level:
+   * the caller passes the few choices a normal user makes as *locks*, and gets
+   * back the recipe plus a plain-language account of what was chosen and what
+   * could not be.
+   */
+  handle('auto:configure', async (_e, request = {}) => {
+    if (!request.analysis) {
+      throw new VisionanceError(CODES.INVALID_REQUEST, {
+        message: 'Analyse the source before configuring it automatically.'
+      });
+    }
+    const result = autoRecipe.buildAutoConfigure({
+      analysis: request.analysis,
+      platform: request.platform || 'custom',
+      profile: request.profile || 'auto',
+      intensity: request.intensity || 'balanced',
+      outputPath: request.outputPath || null,
+      preferences: request.preferences || {},
+      locks: request.locks || null,
+      machine: await autoMachineProfile(),
+      engines: await autoEngineAvailability()
+    });
+    return ok(result);
+  });
+
+  /**
+   * AUTO CONFIGURE (Watch).
+   *
+   * Realtime only. This can never reach Create's recipe, and it is deliberately
+   * a different handler over a different module rather than a flag on the one
+   * above - the two workspaces stay independent all the way down.
+   */
+  handle('watch:auto', (_e, request = {}) => ok(watchAuto.buildWatchAuto({
+    analysis: request.analysis || null,
+    profile: request.profile || 'auto',
+    sourceKind: request.sourceKind === 'stream' ? 'stream' : 'local',
+    machine: request.machine || null,
+    playback: request.playback || null,
+    availableLooks: Array.isArray(request.availableLooks) ? request.availableLooks : null
+  })));
 
   handle('presets:creator', () => ok({ presets: creatorPresets.list() }));
 

@@ -72,10 +72,16 @@
     splitDragging: false,
     scrubbing: false,
     dualStream: false,
-    // Set once a split stream's audio leg has failed and playback has been
-    // recovered as video-only, so the recovery runs once per source rather
-    // than on every error event the dead element emits.
+    // Set once the recovery ladder has been exhausted and playback continues
+    // as video-only, so it runs once per source rather than on every error
+    // event the dead element emits.
     audioLegFailed: false,
+    /**
+     * The bounded audio-recovery ladder's state. Two attempts per source, and
+     * `path` records which rung actually restored the sound — the diagnostics
+     * panel reports it, so "it works now" is never a guess.
+     */
+    audioRecovery: { attempts: 0, running: false, path: null },
     jobs: new Map(),
     analysis: null,        // full source analysis for the loaded media
 
@@ -89,6 +95,8 @@
      */
     createSource: null,
     createAnalysis: null,
+    /** Race guard for the four routes that set Create's source. */
+    createSourceGeneration: 0,
     previewTimer: null,
     previewGeneration: 0,
     /** The plan the main process resolved for the current panel state. */
@@ -144,14 +152,27 @@
     'controlGroups', 'resetParamsBtn',
     'createSourceTitle', 'analyseBtn', 'analysisGrid', 'analysisNote',
     'autoBlock', 'autoState', 'autoProfile', 'autoIntensity', 'autoBuildBtn', 'autoExplain',
+    // AUTO CONFIGURE: the simple path's own readouts. The locks themselves are
+    // the existing geometry controls, moved rather than duplicated.
+    'autoStage', 'autoResult', 'autoUnmet', 'autoWhy',
+    'createAdvancedShell', 'tagPreset', 'createMotionTargetNote',
+    'createCropGuide', 'createCropGuideBox', 'createCropGuideLabel',
+    // Watch's own Auto Configure. Separate block, separate state, separate call.
+    'watchAutoBlock', 'watchAutoState', 'watchAutoProfile', 'watchAutoBtn',
+    'watchAutoStage', 'watchAutoResult', 'watchAutoWhy', 'watchAutoExplain',
     'createPreset', 'recipeName', 'saveRecipeBtn', 'savedRecipeList', 'sendToCreateBtn',
     'createOpenFileBtn', 'createUseWatchBtn', 'createUrlInput', 'createUrlBtn',
+    // One source module in two states: the picker, and the active-source card.
+    'createSourceCard', 'createSourceKind', 'createChangeSourceBtn', 'createSourcePicker',
+    'createPickerHint', 'createUrlToggleBtn', 'createUrlPanel', 'createUrlCancelBtn',
+    'createUrlError', 'createAnalysisModule', 'analysisBrief', 'analysisDetails',
+    'createRecentsModule', 'autoPurpose',
     'createPlatform', 'createRes', 'createFraming', 'createFramingRow', 'createFramingHelp', 'createFps',
     'createAspect', 'createAspectCustomRow', 'createAspectW', 'createAspectH',
     'createResCustomRow', 'createResW', 'createResH', 'createGeometryNote',
     'createCostPreview', 'createCostClass', 'createCostDetail',
     'createEncoder', 'createQuality', 'createQualityVal', 'createUseLook',
-    'createAudio', 'createLoudness', 'createChunked', 'startCreateBtn', 'recipeWarnings',
+    'createKeepAudio', 'createLoudness', 'createChunked', 'startCreateBtn', 'recipeWarnings',
     'aiBlock', 'aiEngineState', 'createAi', 'createAiModelRow', 'createAiModel', 'createAiNote',
     'createAiQualityRow', 'createAiQuality', 'createAiQualityNote',
     'createInterp', 'createSceneRow', 'createScene', 'createSceneHelp', 'createFpsHelp',
@@ -274,6 +295,9 @@
 
       state.dualStream = !!descriptor.audioUrl;
       state.audioLegFailed = false;
+      // A new source gets the full ladder again: the previous source's
+      // exhausted attempts say nothing about this one.
+      state.audioRecovery = { attempts: 0, running: false, path: null };
       v.pause();
       a.pause();
       a.removeAttribute('src');
@@ -394,10 +418,21 @@
      * the position the resume restored, and the user got a black picture with
      * a full inspector and no explanation.
      *
-     * The video leg is healthy in this situation, so the picture is
-     * recoverable. Drop to a single stream, re-arm the video element — which
-     * is what clears the stuck seek — and say plainly that the sound is
-     * missing rather than pretending nothing happened.
+     * Then it went too far the other way: the first refusal dropped the sound
+     * for the rest of the session. A refused audio URL is usually a *stale*
+     * one — these URLs are time-limited and rotate — so giving up permanently
+     * on the first 403 throws away sound that a fresh resolve would have got.
+     *
+     * So there is a ladder, and it is bounded:
+     *
+     *   1. re-resolve this session and re-attach the new audio URL
+     *   2. re-resolve preferring a combined stream, whose sound cannot be
+     *      refused separately because there is no second request
+     *   3. give up: keep the picture, say so plainly
+     *
+     * Two attempts, once per source. The picture is made safe *first* and
+     * never waits for any of it: sound is worth recovering, and never worth
+     * freezing the video for.
      */
     recoverFromAudioFailure() {
       const v = el.video;
@@ -406,24 +441,23 @@
       // given a source and that source failed" is the condition that matters,
       // and it stays true however the split arrangement was arrived at.
       if (state.audioLegFailed || !a.getAttribute('src') || !a.error) return;
-      state.audioLegFailed = true;
-      state.dualStream = false;
+      if (state.audioRecovery.running) return;
+
       const resumeAt = v.currentTime;
       const wasPlaying = !v.paused;
+      const stuck = v.readyState < 3 || v.seeking;
 
+      // --- the picture, made safe before anything else is attempted ---
+      state.dualStream = false;
       a.pause();
       a.removeAttribute('src');
       try { a.load(); } catch { /* nothing to abort */ }
-
-      // The video element carries the sound settings again now that nothing
-      // else does, even though a video-only leg has no audible track.
       v.muted = !!state.settings.muted;
       v.volume = state.settings.volume ?? 1;
 
-      // Re-arm rather than leave the pipeline in its stuck seek. Restoring the
-      // position afterwards keeps the recovery invisible apart from the sound.
-      const src = v.getAttribute('src');
-      if (src) {
+      // Only re-arm a genuinely stuck pipeline. A healthy picture must not be
+      // interrupted to fix the sound.
+      if (stuck && v.getAttribute('src')) {
         const restore = () => {
           if (Number.isFinite(resumeAt) && resumeAt > 0) {
             try { v.currentTime = resumeAt; } catch { /* start from the top */ }
@@ -434,7 +468,148 @@
         v.load();
       }
 
-      toast('This source refused its audio track, so it is playing without sound. ' +
+      this.attemptAudioRecovery({ resumeAt, wasPlaying });
+    },
+
+    /**
+     * The ladder itself. Generation-guarded like every other asynchronous step
+     * in this file: a source switch mid-recovery abandons the attempt rather
+     * than attaching a dead stream's audio to a new video.
+     */
+    async attemptAudioRecovery({ resumeAt = 0, wasPlaying = false } = {}) {
+      const descriptor = state.media;
+      const generation = state.source.generation;
+      const stale = () => generation !== state.source.generation;
+      if (!descriptor || descriptor.kind !== 'stream') return this.giveUpOnAudio('local');
+
+      state.audioRecovery.running = true;
+      try {
+        while (state.audioRecovery.attempts < 2) {
+          const attempt = ++state.audioRecovery.attempts;
+          const res = attempt === 1
+            // Same session, fresh URLs. Cheap, and the common cure.
+            ? await api.media.refreshStream(state.source.token)
+            // A combined rendition: one request, so there is no audio leg left
+            // to refuse. Costs resolution, which is the right trade for sound.
+            : await api.media.resolveUrl(descriptor.webpageUrl || descriptor.source, {
+              watchQuality: state.watchQuality,
+              preferMuxed: true
+            });
+          if (stale()) {
+            if (attempt === 2 && res.ok && res.streamToken) {
+              api.media.releaseStream(res.streamToken).catch(() => {});
+            }
+            return;
+          }
+          if (!res.ok) continue;
+
+          if (attempt === 2) {
+            // A different session entirely: adopt it, and let the old one go.
+            const previous = state.source.token;
+            state.source.token = res.streamToken || null;
+            state.media = res;
+            if (previous && previous !== state.source.token) {
+              api.media.releaseStream(previous).catch(() => {});
+            }
+          }
+
+          const recovered = await this.reattachAudio(res, { resumeAt, wasPlaying, attempt });
+          if (stale()) return;
+          if (recovered) {
+            state.audioRecovery.path = attempt === 1 ? 'refreshed-session' : 'muxed-fallback';
+            toast(attempt === 1
+              ? 'The audio track was refused and has been restored from a fresh stream.'
+              : 'The separate audio track kept being refused, so a combined stream is playing ' +
+                'instead. The picture may be slightly lower resolution.', 'ok', 7000);
+            refreshWatchSurfaces();
+            return;
+          }
+        }
+        this.giveUpOnAudio('exhausted');
+      } finally {
+        state.audioRecovery.running = false;
+      }
+    },
+
+    /**
+     * Put a recovered descriptor's audio back on the elements and prove it
+     * works, rather than assuming it does.
+     *
+     * "Proof" is the element reaching `canplay` without erroring inside a
+     * bounded window. Without the timeout a silently stalled URL would leave
+     * the ladder waiting forever, which is the failure this whole path exists
+     * to stop.
+     */
+    reattachAudio(descriptor, { resumeAt = 0, wasPlaying = false, attempt = 1 } = {}) {
+      const v = el.video;
+      const a = el.audio;
+
+      if (attempt === 2 && descriptor.muxed !== false) {
+        // A combined stream carries its own sound: the video element becomes
+        // the audible one again and the audio element stays out of it.
+        return new Promise((resolve) => {
+          const timer = setTimeout(() => { cleanup(); resolve(false); }, 12000);
+          const cleanup = () => {
+            clearTimeout(timer);
+            v.removeEventListener('loadedmetadata', onReady);
+            v.removeEventListener('error', onError);
+          };
+          const onReady = () => {
+            cleanup();
+            state.dualStream = false;
+            v.muted = !!state.settings.muted;
+            v.volume = state.settings.volume ?? 1;
+            if (Number.isFinite(resumeAt) && resumeAt > 0) {
+              try { v.currentTime = resumeAt; } catch { /* from the top */ }
+            }
+            if (wasPlaying) media.play();
+            resolve(true);
+          };
+          const onError = () => { cleanup(); resolve(false); };
+          v.addEventListener('loadedmetadata', onReady, { once: true });
+          v.addEventListener('error', onError, { once: true });
+          v.src = descriptor.playbackUrl;
+          v.load();
+        });
+      }
+
+      if (!descriptor.audioUrl) return Promise.resolve(false);
+
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => { cleanup(); resolve(false); }, 12000);
+        const cleanup = () => {
+          clearTimeout(timer);
+          a.removeEventListener('canplay', onReady);
+          a.removeEventListener('error', onError);
+        };
+        const onReady = () => {
+          cleanup();
+          state.dualStream = true;
+          v.muted = true;
+          a.muted = !!state.settings.muted;
+          a.volume = state.settings.volume ?? 1;
+          a.playbackRate = v.playbackRate;
+          try { a.currentTime = v.currentTime; } catch { /* it will sync */ }
+          if (!v.paused) media.playAudio();
+          resolve(true);
+        };
+        const onError = () => { cleanup(); resolve(false); };
+        a.addEventListener('canplay', onReady, { once: true });
+        a.addEventListener('error', onError, { once: true });
+        a.src = descriptor.audioUrl;
+        a.load();
+      });
+    },
+
+    /** The last rung: the picture keeps playing and the user is told why. */
+    giveUpOnAudio(reason) {
+      if (state.audioLegFailed) return;
+      state.audioLegFailed = true;
+      state.dualStream = false;
+      state.audioRecovery.path = `none (${reason})`;
+      el.video.muted = !!state.settings.muted;
+      el.video.volume = state.settings.volume ?? 1;
+      toast('This source kept refusing its audio track, so it is playing without sound. ' +
         'The picture is unaffected.', 'warn', 9000);
       refreshWatchSurfaces();
     },
@@ -631,6 +806,10 @@
       window.__vsLastMedia = descriptor;
       state.analysis = descriptor.analysis || null;
       state.resumeKey = descriptor.source;
+      // A different video is a different realtime decision. The previous one
+      // is not re-run behind the user's back; it simply stops being claimed as
+      // current, and the button re-arms.
+      markWatchAutoStale();
 
       el.stageEmpty.hidden = true;
       el.brandSub.textContent = descriptor.title || 'No source';
@@ -738,6 +917,35 @@
     // are collected continuously, but only surfaced when asked for.
     window.visionanceDiagnostics = {
       mark: (label) => state.playback.mark(label),
+      /**
+       * The audio ladder's own account: which rung restored the sound, where
+       * both clocks are, and how far apart. Read by the harness so "audio
+       * works" is a measurement rather than an assurance.
+       */
+      audio: () => ({
+        dual: state.dualStream,
+        legFailed: state.audioLegFailed,
+        recovery: { ...state.audioRecovery },
+        video: {
+          t: el.video.currentTime,
+          muted: el.video.muted,
+          volume: el.video.volume,
+          readyState: el.video.readyState,
+          decodedAudioBytes: el.video.webkitAudioDecodedByteCount ?? null
+        },
+        audio: {
+          attached: !!el.audio.getAttribute('src'),
+          t: el.audio.currentTime,
+          muted: el.audio.muted,
+          volume: el.audio.volume,
+          readyState: el.audio.readyState,
+          error: el.audio.error ? el.audio.error.code : null,
+          decodedAudioBytes: el.audio.webkitAudioDecodedByteCount ?? null
+        },
+        drift: state.dualStream ? el.audio.currentTime - el.video.currentTime : 0
+      }),
+      /** The analysis ladder's second rung, so a test can exercise it directly. */
+      analysisFromRendition: (descriptor) => analysisFromRendition(descriptor),
       snapshot: () => ({
         playback: state.playback.snapshot(),
         presentation: state.presentation,
@@ -1629,6 +1837,110 @@
    * video element, so nothing Create does can interrupt playback.
    * ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------ *
+   * Facts from a resolved rendition
+   *
+   * The second rung of the analysis ladder, shared by Create and Watch.
+   *
+   * A resolved stream already carries measured facts about the exact rendition
+   * that will be played or rendered: the site states its width, height, frame
+   * rate, bitrate and codecs, and yt-dlp reports them verbatim. They are not a
+   * guess and not a default — they are simply *declared* rather than *probed*,
+   * and everything built from them says so.
+   * ------------------------------------------------------------------ */
+
+  /** The class both edges agree on, so a vertical source is not "1920p". */
+  function resolutionClassOf(w, h) {
+    if (!w || !h) return null;
+    const long = Math.max(w, h);
+    const short = Math.min(w, h);
+    if (long >= 7000 || short >= 4000) return '8K';
+    if (long >= 3400 || short >= 1900) return '4K';
+    if (long >= 2400 || short >= 1400) return '1440p';
+    if (long >= 1700 || short >= 1000) return '1080p';
+    if (long >= 1100 || short >= 700) return '720p';
+    if (long >= 800) return '480p';
+    return 'SD';
+  }
+
+  /** What the resolver said about the audio, or null when there is none. */
+  function audioFromRendition(descriptor) {
+    if (!descriptor) return null;
+    const leg = descriptor.audio || null;
+    const muxedCodec = descriptor.video && descriptor.video.acodec;
+    const carriesAudio = !!descriptor.audioUrl ||
+      (descriptor.muxed !== false && muxedCodec && muxedCodec !== 'none');
+    if (!leg && !carriesAudio) return null;
+    return {
+      codec: (leg && leg.acodec) || muxedCodec || null,
+      channels: null,
+      sampleRate: null,
+      bitrate: leg && leg.abr ? Math.round(leg.abr * 1000) : null,
+      isDefault: true
+    };
+  }
+
+  /**
+   * An analysis in the analyser's own shape, built from the rendition.
+   * Returns null when the descriptor does not even state a size, because an
+   * analysis that knows nothing is worse than no analysis at all.
+   */
+  function analysisFromRendition(descriptor) {
+    const f = (descriptor && (descriptor.video || descriptor.info)) || null;
+    if (!f || !f.width || !f.height) return null;
+    const w = f.width;
+    const h = f.height;
+    // `tbr` is the rendition's own bitrate in kbps. For a split pair that is
+    // the video leg alone; for a combined stream it includes the audio.
+    const bitrate = f.tbr ? Math.round(f.tbr * 1000) : null;
+    const duration = descriptor.duration ||
+      (descriptor.info && descriptor.info.duration) || null;
+    const audio = audioFromRendition(descriptor);
+
+    return {
+      schemaVersion: 1,
+      analysedAt: Date.now(),
+      source: {
+        type: 'remote',
+        url: descriptor.source || null,
+        name: descriptor.title || null
+      },
+      container: { bitrate, duration, size: null },
+      video: {
+        width: w,
+        height: h,
+        nominalFps: f.fps || null,
+        bitrate,
+        codec: f.vcodec || null
+      },
+      color: { isHDR: false },
+      audio,
+      audioStreams: audio ? [audio] : [],
+      derived: {
+        displayWidth: w,
+        displayHeight: h,
+        durationSeconds: duration,
+        orientation: w > h ? 'landscape' : w < h ? 'portrait' : 'square',
+        isVertical: h > w,
+        isHDR: false,
+        // Not measured, and not assumed either: `null` is "unknown" everywhere
+        // downstream, where `false` would be a claim.
+        isInterlaced: null,
+        nominalFps: f.fps || null,
+        frameRateMode: 'unknown',
+        resolutionClass: resolutionClassOf(w, h),
+        hasAudio: !!audio,
+        megapixels: Math.round((w * h) / 1e4) / 100
+      },
+      warnings: [
+        'This stream could not be probed directly, so these are the figures the site ' +
+        'declares for the rendition Visionance selected.'
+      ],
+      /** Marks the second rung, so the UI can say which one it is on. */
+      fromRendition: true
+    };
+  }
+
   /** Take an immutable snapshot of a source descriptor for Create to hold. */
   function snapshotSource(descriptor, analysis) {
     if (!descriptor) return null;
@@ -1706,6 +2018,7 @@
       el.createPreviewBadge.hidden = !ready;
       if (error) el.createPreviewErrorText.textContent = error;
       el.createPreviewTag.textContent = tag;
+      updateCropGuide();
     },
 
     /**
@@ -1849,12 +2162,43 @@
     }
   };
 
+  /**
+   * Every route into Create's source goes through here, and the last one the
+   * user actually asked for is the one that lands.
+   *
+   * All four routes await something — a file dialog, a probe, a resolve — and
+   * none of them was guarded, so two selections in quick succession resolved
+   * in whatever order the IPC happened to complete. Clicking a recent and
+   * immediately clicking another could leave the panel naming the second and
+   * the render aimed at the first, which is the one class of bug this
+   * workspace cannot afford: it is silent, and it only shows up in the output
+   * file.
+   *
+   * Same shape as Watch's `switchSource()` generation guard, for the same
+   * reason. `resolve` may return null to abandon quietly.
+   */
+  async function selectCreateSource(resolve, { onSuccess = null } = {}) {
+    const generation = ++state.createSourceGeneration;
+    const snapshot = await resolve();
+    // Superseded while we were waiting: the newer selection owns the panel now.
+    if (!snapshot || generation !== state.createSourceGeneration) return null;
+    await setCreateSource(snapshot);
+    if (onSuccess) onSuccess(snapshot);
+    return snapshot;
+  }
+
   async function setCreateSource(snapshot) {
     state.createSource = snapshot;
     state.createAnalysis = (snapshot && snapshot.analysis) || null;
     state.autoResult = null;
+    state.autoStale = false;
     state.recipeState = 'custom';
-    el.autoState.textContent = snapshot ? 'Ready' : 'No source';
+    // A new source means the previous account is about a different video.
+    el.autoResult.hidden = true;
+    el.autoUnmet.hidden = true;
+    el.autoWhy.hidden = true;
+    el.autoBuildBtn.classList.toggle('is-armed', !!snapshot);
+    setAutoState('custom');
     refreshCreateSource();
     syncGeometryUi();
     schedulePreview();
@@ -1867,46 +2211,111 @@
   async function createOpenFile() {
     const res = await api.dialog.openVideo();
     if (!res.ok) return;
-    const opened = await api.media.open(res.files[0]);
-    if (!opened.ok) return reportFailure(opened);
-    await setCreateSource(snapshotSource(opened, opened.analysis));
-    toast('Create source set. Watch is untouched.', 'ok', 3500);
+    await selectCreateSource(async () => {
+      const opened = await api.media.open(res.files[0]);
+      if (!opened.ok) { reportFailure(opened); return null; }
+      closeUrlEntry();
+      return snapshotSource(opened, opened.analysis);
+    }, { onSuccess: () => toast('Create source set. Watch is untouched.', 'ok', 3500) });
+  }
+
+  /** A refusal the user can act on, shown where they typed the address. */
+  function showUrlError(res, fallback) {
+    const message = (res && (res.message || res.error)) || fallback ||
+      'Could not resolve this source.';
+    el.createUrlError.hidden = false;
+    el.createUrlError.textContent = message;
+    // Deliberately not cleared: the address stays so it can be corrected.
+    el.createUrlInput.focus();
   }
 
   async function createOpenUrl() {
     const raw = (el.createUrlInput.value || '').trim();
-    if (!raw) return toast('Paste a video URL first.', 'warn');
+    if (!raw) {
+      el.createUrlError.hidden = false;
+      el.createUrlError.textContent = 'Paste a video URL first.';
+      return;
+    }
     el.createUrlBtn.disabled = true;
     el.createUrlBtn.textContent = 'Resolving…';
-    // Resolved purely to identify and describe the source. The token is
-    // released immediately: the job re-resolves the page URL when it runs, so
-    // nothing long-lived depends on a session that expires in hours.
-    const res = await api.media.resolveUrl(raw, { watchQuality: 'quality' });
-    el.createUrlBtn.disabled = false;
-    el.createUrlBtn.textContent = 'Load';
-    if (!res.ok) return reportFailure(res);
-    if (res.isLive) {
+    el.createUrlError.hidden = true;
+
+    const loaded = await selectCreateSource(async () => {
+      // Resolved purely to identify and describe the source. The token is
+      // released immediately: the job re-resolves the page URL when it runs, so
+      // nothing long-lived depends on a session that expires in hours.
+      const res = await api.media.resolveUrl(raw, { watchQuality: 'quality' });
+      el.createUrlBtn.disabled = false;
+      el.createUrlBtn.textContent = 'Load source';
+      if (!res.ok) { showUrlError(res, 'Could not resolve this source.'); return null; }
+      if (res.isLive) {
+        api.media.releaseStream(res.streamToken).catch(() => {});
+        showUrlError(null, 'Playback-only source — a live stream cannot be rendered to a file.');
+        return null;
+      }
+      // The rendition's own declared facts travel with the snapshot, so Auto
+      // has something trustworthy to work from even before anything is probed.
+      const snapshot = snapshotSource(res, analysisFromRendition(res));
       api.media.releaseStream(res.streamToken).catch(() => {});
-      return toast('Live streams cannot be rendered to a file.', 'warn', 6000);
-    }
-    const snapshot = snapshotSource(res, null);
-    api.media.releaseStream(res.streamToken).catch(() => {});
-    await setCreateSource(snapshot);
-    toast(`Create source: ${snapshot.title}`, 'ok', 4000);
+      closeUrlEntry();
+      return snapshot;
+    });
+    if (loaded) toast(`Create source: ${loaded.title}`, 'ok', 4000);
   }
 
   async function createUseWatchSource() {
     if (!state.media) return toast('Nothing is playing in Watch.', 'warn');
-    await setCreateSource(snapshotSource(state.media, state.analysis));
-    toast('Create is now aimed at the Watch video.', 'ok', 3500);
+    closeUrlEntry();
+    await selectCreateSource(
+      () => snapshotSource(state.media, state.analysis || analysisFromRendition(state.media)),
+      { onSuccess: () => toast('Create is now aimed at the Watch video.', 'ok', 3500) }
+    );
+  }
+
+  /**
+   * The source module has two states and one authority.
+   *
+   * With no source it is a picker. With a source it is a card plus a way back
+   * to the picker. It is never both at once, and the URL box is never left
+   * sitting under an already-loaded source — a stale address under a different
+   * active video is how "which one is this actually going to render?" starts.
+   */
+  function refreshSourceModuleState({ picking = false } = {}) {
+    const has = !!state.createSource;
+    el.createSourceCard.hidden = !has;
+    el.createChangeSourceBtn.hidden = !has || picking;
+    // The picker shows when there is nothing yet, or when it was asked for.
+    const showPicker = (!has || picking) && el.createUrlPanel.hidden;
+    el.createSourcePicker.hidden = !showPicker;
+    el.createPickerHint.textContent = has
+      ? 'Replace the source this render is aimed at.'
+      : 'Choose what you want to build from.';
+    // Recents stop competing with an active source without disappearing.
+    el.createRecentsModule.classList.toggle('is-quiet', has && !picking);
+    el.createAnalysisModule.hidden = !has;
+  }
+
+  function openUrlEntry() {
+    el.createUrlPanel.hidden = false;
+    el.createUrlError.hidden = true;
+    el.createSourcePicker.hidden = true;
+    el.createChangeSourceBtn.hidden = true;
+    el.createUrlInput.focus();
+    el.createUrlInput.select();
+  }
+
+  function closeUrlEntry() {
+    el.createUrlPanel.hidden = true;
+    el.createUrlError.hidden = true;
+    refreshSourceModuleState();
   }
 
   function refreshCreateSource() {
     const src = state.createSource;
     if (!src) {
       el.createSourceTitle.textContent = 'No source selected';
-      el.createSourceSub.textContent =
-        'Choose a video, paste a URL, or use whatever Watch is playing.';
+      el.createSourceSub.textContent = '';
+      el.createSourceKind.textContent = '';
       // A neutral placeholder, not an empty box: the slot is part of the
       // layout whether or not there is a source in it yet.
       el.createThumb.dataset.thumbId = '';
@@ -1915,13 +2324,18 @@
         `<div class="thumb-fallback">${ICONS.mediaMark}</div>`;
       el.analysisGrid.innerHTML = '';
       el.analysisNote.textContent = '';
+      el.analysisBrief.textContent = '';
       el.createKindTag.textContent = '';
+      refreshSourceModuleState();
       updateRenderSummary();
       return;
     }
     el.createSourceTitle.textContent = src.title || src.source;
     el.createSourceTitle.title = src.source;
     el.createKindTag.textContent = src.kind === 'stream' ? 'Online' : 'Local';
+    el.createSourceKind.textContent = src.kind === 'stream' ? 'Online source' : 'Local source';
+    el.createSourceKind.className = `source-kind ${src.kind === 'stream' ? 'online' : 'local'}`;
+    refreshSourceModuleState();
 
     // The identity, and therefore the picture, that this source carries
     // everywhere else in the app.
@@ -1973,7 +2387,10 @@
     const cells = [
       ['Queued', active.length ? String(active.length) : '—', active.length ? 'on' : '', 'queue'],
       ['Rendered', done ? String(done) : '—', '', 'queue'],
-      ['Engines', `${engines}/2`, engines === 2 ? 'ok' : '', null],
+      // Named precisely, because the console below counts a third thing —
+      // the optional detector — and two unexplained fractions on one screen
+      // is the kind of small inconsistency that costs trust.
+      ['Render engines', `${engines}/2`, engines === 2 ? 'ok' : '', null],
       ['Recents', lastRecents.length ? String(lastRecents.length) : '—', '', 'library']
     ];
 
@@ -2060,10 +2477,12 @@
       el.createUrlInput.value = item.source;
       return createOpenUrl();
     }
-    const opened = await api.media.open(item.source);
-    if (!opened.ok) return reportFailure(opened);
-    await setCreateSource(snapshotSource(opened, opened.analysis));
-    toast('Create source set. Watch is untouched.', 'ok', 3500);
+    await selectCreateSource(async () => {
+      const opened = await api.media.open(item.source);
+      if (!opened.ok) { reportFailure(opened); return null; }
+      closeUrlEntry();
+      return snapshotSource(opened, opened.analysis);
+    }, { onSuccess: () => toast('Create source set. Watch is untouched.', 'ok', 3500) });
   }
 
   /* ------------------------------------------------------------------ *
@@ -2100,9 +2519,24 @@
       ? (interp === 'ai' ? 'Source rate · RIFE' : 'Source rate')
       : `${fps} fps · ${INTERP_LABEL[interp]}`;
 
+    // The frame-rate control lives at the top of the panel now, so this
+    // section states what it is working toward rather than owning it.
+    if (el.createMotionTargetNote) {
+      const srcFps = state.createAnalysis && state.createAnalysis.video &&
+        state.createAnalysis.video.nominalFps;
+      el.createMotionTargetNote.textContent = fps === 'source'
+        ? `Output frame rate: same as source${srcFps ? ` (${srcFps} fps)` : ''}. Set it under Output at the top of this panel.`
+        : `Output frame rate: ${fps} fps${srcFps ? `, from a ${srcFps} fps source` : ''}. Set it under Output at the top of this panel.`;
+    }
+    if (el.tagPreset) {
+      el.tagPreset.textContent = el.createPreset.value
+        ? (el.createPreset.selectedOptions[0] || {}).textContent || ''
+        : 'Custom';
+    }
+
     el.tagColor.textContent = el.createUseLook.checked ? 'Player look applied' : 'No grade';
 
-    el.tagAudio.textContent = !el.createAudio.checked
+    el.tagAudio.textContent = !el.createKeepAudio.checked
       ? 'Dropped'
       : (el.createLoudness.checked
         ? (AUDIO_MASTER_LABEL[state.audioMaster] && state.audioMaster !== 'preserve'
@@ -2144,16 +2578,50 @@
       add(el.createAi.value === 'restore' ? 'Neural restore' : `Neural ${el.createAi.value}×`, true);
     }
     if (el.createInterp.value === 'ai') add('RIFE', true);
-    if (el.createAudio.checked && el.createLoudness.checked) {
+    if (el.createKeepAudio.checked && el.createLoudness.checked) {
       add(AUDIO_MASTER_LABEL[state.audioMaster] && state.audioMaster !== 'preserve'
         ? AUDIO_MASTER_LABEL[state.audioMaster] : 'Normalized');
-    } else if (!el.createAudio.checked) {
+    } else if (!el.createKeepAudio.checked) {
       add('No audio');
+    }
+  }
+
+  /**
+   * The four facts worth a permanent line, and nothing else.
+   * The other eleven are behind "Details", where they were always going.
+   */
+  function renderAnalysisBrief(analysis) {
+    const node = el.analysisBrief;
+    if (!node) return;
+    node.innerHTML = '';
+    if (!analysis) {
+      node.textContent = state.createSource ? 'Not analysed yet.' : '';
+      return;
+    }
+    const v = analysis.video || {};
+    const d = analysis.derived || {};
+    const bits = [
+      d.displayWidth ? `${d.displayWidth} × ${d.displayHeight}` : null,
+      v.nominalFps ? `${v.nominalFps} fps` : null,
+      v.codec ? v.codec.toUpperCase() : null,
+      d.durationSeconds ? fmtTime(d.durationSeconds) : null
+    ].filter(Boolean);
+    for (const bit of bits) {
+      const span = document.createElement('span');
+      span.textContent = bit;
+      node.appendChild(span);
+    }
+    // Say which rung of the ladder these figures came from, once, here.
+    if (analysis.fromRendition) {
+      const tag = document.createElement('em');
+      tag.textContent = 'declared by the site';
+      node.appendChild(tag);
     }
   }
 
   function renderAnalysis(analysis) {
     el.analysisGrid.innerHTML = '';
+    renderAnalysisBrief(analysis);
     if (!analysis) {
       const src = state.createSource;
       el.analysisNote.textContent = src && src.kind === 'stream'
@@ -2215,6 +2683,42 @@
         return reportFailure(resolved, 'That source could not be resolved for analysis.');
       }
       res = await api.media.analyze({ token: resolved.streamToken, leg: 'video' }, { deep: false });
+
+      /*
+       * The probe is the best answer, not the only acceptable one.
+       *
+       * ffprobe reads the direct CDN URL, and a site can simply refuse it:
+       * measured here, resolve succeeded in 7.7 s and the probe came back
+       * PROBE_FAILED in 343 ms. Treating that as fatal meant Auto Configure
+       * could not run at all on an online source the app was, at that moment,
+       * happily playing — every fact it needed was already in the resolver's
+       * answer.
+       *
+       * So the probe becomes the first rung of a ladder: measured facts when
+       * they are available, the resolver's declared rendition when they are
+       * not, and a warning either way about which one this is. Nothing is
+       * invented — a field neither source reports stays null.
+       */
+      if (!res.ok) {
+        const fallback = analysisFromRendition(resolved);
+        if (fallback) {
+          res = { ok: true, analysis: fallback };
+        }
+      } else {
+        /*
+         * A split stream carries its audio in a separate leg, which the video
+         * probe cannot see: the analysis comes back saying the source has no
+         * audio at all. Every recipe built from it then switched audio off —
+         * Auto announced "No audio: the source has none" about a video that
+         * has some, and the render would have agreed with it and produced a
+         * silent file.
+         */
+        if (resolved.audioUrl && !res.analysis.audio) {
+          res.analysis.audio = audioFromRendition(resolved);
+          res.analysis.audioStreams = [res.analysis.audio];
+          res.analysis.derived.hasAudio = true;
+        }
+      }
       api.media.releaseStream(resolved.streamToken).catch(() => {});
     }
 
@@ -2718,6 +3222,14 @@
     el.createCostClass.textContent = res.cost.label;
     el.createCostClass.className = `cost-class ${res.cost.class}`;
 
+    // One cost, in both places it appears. The resolved plan wins: it is the
+    // only one that knows which model was chosen and at what pre-scale.
+    const autoChip = document.getElementById('autoCostChip');
+    if (autoChip) {
+      autoChip.textContent = res.cost.label;
+      autoChip.className = `cost-class ${res.cost.class}`;
+    }
+
     const bits = [];
     if (res.geometry && res.geometry.width) {
       bits.push(`${res.geometry.width}×${res.geometry.height}`);
@@ -2738,40 +3250,252 @@
     return `${(seconds / 3600).toFixed(1)} hours`;
   }
 
-  /** Ask Auto what it would do, and show its reasoning before committing. */
+  /* ------------------------------------------------------------------ *
+   * AUTO CONFIGURE (Create)
+   *
+   * The product-level entry point to the Auto engine that already existed.
+   * The difference is not new intelligence, it is a contract: the four
+   * controls at the top of the panel are *locks*, and Auto configures the
+   * technical settings around them rather than replacing them.
+   * ------------------------------------------------------------------ */
+
+  /**
+   * The user's hard requirements, exactly as the panel currently states them.
+   *
+   * Read from the same controls the recipe is built from, so a lock can never
+   * describe something different from what would render.
+   */
+  function currentLocks() {
+    const aspect = currentAspect();
+    const size = resolveGeometryChoice(aspect, suggestedResolutionFor(aspect));
+    const resValue = el.createRes.value;
+    const fps = el.createFps.value;
+    return {
+      platform: el.createPlatform.value,
+      aspect: el.createAspect.value,
+      aspectW: aspect && aspect.id === 'custom' ? aspect.w : null,
+      aspectH: aspect && aspect.id === 'custom' ? aspect.h : null,
+      // "Same as source" is an answer; an unset size is not.
+      resolution: resValue === 'source' ? 'source' : (size ? 'custom' : null),
+      width: size ? size.width : null,
+      height: size ? size.height : null,
+      fps: fps === 'source' ? null : Number(fps)
+    };
+  }
+
+  /**
+   * Ask Visionance to configure the technical settings for what was asked for.
+   *
+   * Three visible states, because analysing a source is not instant and a
+   * button that looks inert for four seconds is a button people press twice.
+   */
   async function runAuto() {
     if (!state.createSource) return toast('Choose a Create source first.', 'warn');
+    el.autoBuildBtn.disabled = true;
+    setAutoStage('Analysing…');
+
     if (!state.createAnalysis) {
       await analyseSource();
-      if (!state.createAnalysis) return;
+      if (!state.createAnalysis) {
+        el.autoBuildBtn.disabled = false;
+        setAutoStage(null);
+        setAutoState('failed');
+        return;
+      }
     }
-    el.autoBuildBtn.disabled = true;
-    el.autoState.textContent = 'Working';
 
-    const res = await api.auto.build({
+    setAutoStage('Building settings…');
+    const res = await api.auto.configure({
       analysis: state.createAnalysis,
       platform: el.createPlatform.value,
       profile: el.autoProfile.value,
       intensity: el.autoIntensity.value,
+      locks: currentLocks(),
       outputPath: null
     });
     el.autoBuildBtn.disabled = false;
+    setAutoStage(null);
     if (!res.ok) {
-      el.autoState.textContent = 'Failed';
-      return reportFailure(res, 'Auto could not build a recipe.');
+      setAutoState('failed');
+      return reportFailure(res, 'Auto could not configure this source.');
     }
 
     state.autoResult = res;
+    state.autoStale = false;
     state.recipeState = 'auto';
-    applyRecipeToControls(res.recipe);
+    // `keepLocks` is the contract in code: Auto has already resolved the
+    // recipe around these four answers, so nothing writes back over them.
+    applyRecipeToControls(res.recipe, { keepLocks: true });
+    renderAutoResult(res);
     renderAutoExplanation(res);
-    // The state chip says whether these are still Auto's settings, not what
-    // they cost - the cost preview owns that, from the resolved plan.
-    el.autoState.textContent = 'Applied';
-    el.autoState.classList.add('ready');
+    setAutoState('auto');
+    updateCropGuide();
+  }
+
+  function setAutoStage(text) {
+    el.autoStage.hidden = !text;
+    el.autoStage.textContent = text || '';
+    el.autoBuildBtn.classList.toggle('is-working', !!text);
+  }
+
+  /**
+   * Once Auto has answered, the block stops asking.
+   *
+   * The explanatory sentence and the full-width call to action exist to get
+   * the first press; afterwards they are a large empty panel sitting above the
+   * answer. Configured, this collapses to the decisions plus a quiet way to
+   * run it again.
+   */
+  function setAutoConfigured(configured) {
+    el.autoBlock.classList.toggle('is-configured', configured);
+    el.autoPurpose.hidden = configured;
+    el.autoBuildBtn.textContent = configured ? 'Reconfigure' : 'Auto configure';
+    el.autoBuildBtn.classList.toggle('btn-accent', !configured);
+    el.autoBuildBtn.classList.toggle('btn-ghost', configured);
+    if (configured) el.autoBuildBtn.classList.remove('is-armed');
+  }
+
+  /**
+   * The recipe-state chip.
+   *
+   * Three states the app already tracked and never said out loud: these are
+   * still Auto's settings, they are Auto's settings you have since edited, or
+   * they are yours from the start.
+   */
+  function setAutoState(kind) {
+    const node = el.autoState;
+    node.classList.remove('ready', 'warn');
+    if (kind === 'auto') {
+      node.textContent = 'Configured';
+      node.classList.add('ready');
+      node.title = 'These are Visionance\'s settings for what you asked for.';
+    } else if (kind === 'modified') {
+      node.textContent = 'Configured · edited';
+      node.title = 'Auto configured this, and you have changed something since.';
+    } else if (kind === 'stale') {
+      node.textContent = 'Ready';
+      node.title = 'What you asked for has changed. Auto Configure will re-decide around it.';
+    } else if (kind === 'failed') {
+      node.textContent = 'Failed';
+      node.classList.add('warn');
+      node.title = '';
+    } else if (kind === 'custom') {
+      node.textContent = state.createSource ? 'Ready' : 'No source';
+      node.title = '';
+    }
+    // The block is compact whenever there is an answer on screen, including
+    // an answer the user has since edited.
+    setAutoConfigured(kind === 'auto' || kind === 'modified');
+  }
+
+  /**
+   * What Auto actually chose, in a form a person who has never heard of
+   * Real-ESRGAN can read. Every line comes from the recipe that was produced -
+   * there is no template here, and an entry appears only when the
+   * corresponding stage is genuinely switched on.
+   */
+  function renderAutoResult(res) {
+    const summary = res.summary;
+    const host = el.autoResult;
+    host.hidden = false;
+    host.innerHTML = '';
+
+    const block = (title, body) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'auto-block-row';
+      const h = document.createElement('span');
+      h.className = 'auto-block-title';
+      h.textContent = title;
+      wrap.append(h, body);
+      host.appendChild(wrap);
+    };
+
+    const text = (value) => {
+      const b = document.createElement('b');
+      b.textContent = value;
+      return b;
+    };
+
+    if (summary.source.label) block('Source', text(summary.source.label));
+    if (summary.output.label) block('Output', text(summary.output.label));
+
+    if (summary.chose.length) {
+      const list = document.createElement('ul');
+      list.className = 'auto-chose';
+      for (const item of summary.chose) {
+        const li = document.createElement('li');
+        const strong = document.createElement('strong');
+        strong.textContent = item.label;
+        li.appendChild(strong);
+        if (item.detail) {
+          const em = document.createElement('em');
+          em.textContent = item.detail;
+          li.appendChild(em);
+        }
+        list.appendChild(li);
+      }
+      block('Visionance chose', list);
+    }
+
+    /*
+     * Auto's own cost figure, which the resolved plan then supersedes.
+     *
+     * Auto estimates before the engine planner has chosen a model or decided
+     * whether the network runs on full-size frames, so it is the weaker of two
+     * claims about the same thing. Rather than show both and let them
+     * disagree, the chip carries an id and `refreshCostPreview()` overwrites it
+     * the moment the authoritative plan comes back.
+     */
+    const cost = document.createElement('span');
+    cost.id = 'autoCostChip';
+    cost.className = `cost-class ${summary.cost}`;
+    cost.textContent = summary.costLabel;
+    block('Cost', cost);
+
+    renderAutoUnmet(res.unmet || []);
+  }
+
+  /**
+   * Requests that could not be met, with the action that would fix each one.
+   *
+   * This is the part that makes the locks worth having: the alternative is
+   * quietly rendering 30 fps because RIFE is missing and letting the user find
+   * out from the file.
+   */
+  function renderAutoUnmet(unmet) {
+    const host = el.autoUnmet;
+    host.innerHTML = '';
+    host.hidden = !unmet.length;
+    for (const item of unmet) {
+      const row = document.createElement('div');
+      row.className = 'auto-unmet-row';
+      const head = document.createElement('strong');
+      head.textContent = item.requested ? `${item.requested} — not as asked` : 'Not as asked';
+      const why = document.createElement('p');
+      why.textContent = [item.reason, item.action].filter(Boolean).join(' ');
+      row.append(head, why);
+
+      // Only offer an install when there is genuinely something to install.
+      const engineId = /RIFE/i.test(item.reason) ? 'rife'
+        : /Real-ESRGAN/i.test(item.reason) ? 'realesrgan' : null;
+      if (engineId && !engineReady(engineId)) {
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-ghost';
+        btn.textContent = `Install ${engineId === 'rife' ? 'RIFE' : 'Real-ESRGAN'}`;
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          await installEngine(engineId);
+          btn.disabled = false;
+          if (engineReady(engineId)) runAuto();
+        });
+        row.appendChild(btn);
+      }
+      host.appendChild(row);
+    }
   }
 
   function renderAutoExplanation(res) {
+    el.autoWhy.hidden = false;
     el.autoExplain.hidden = false;
     el.autoExplain.innerHTML = '';
     const head = document.createElement('p');
@@ -2800,14 +3524,30 @@
   }
 
   /**
+   * A lock changed, so Auto's answer is about a question nobody asked any
+   * more. It is not recomputed here: recomputing while someone is still
+   * choosing produces four renders of the panel and a fight over the
+   * resolution control. The button simply becomes live again.
+   */
+  function markAutoStale() {
+    if (!state.createSource) return;
+    state.autoStale = true;
+    if (state.recipeState === 'auto' || state.recipeState === 'modified') {
+      state.recipeState = 'custom';
+    }
+    setAutoState('stale');
+    el.autoBuildBtn.classList.add('is-armed');
+  }
+
+  /**
    * Reflect a recipe back into the panel controls.
    * Auto proposes; the user edits from there. Editing one control marks the
    * recipe 'modified' rather than silently discarding the rest of Auto's work.
    */
-  function applyRecipeToControls(recipe) {
+  function applyRecipeToControls(recipe, { keepLocks = false } = {}) {
     if (!recipe) return;
     const r = recipe;
-    el.createPlatform.value = r.output.platform || 'custom';
+    if (!keepLocks) el.createPlatform.value = r.output.platform || 'custom';
 
     if (r.reconstruction.mode === 'neural') {
       el.createAi.value = r.reconstruction.aiMode === 'restore'
@@ -2821,53 +3561,62 @@
 
     el.createInterp.value = r.motion.interpolation === 'ai' ? 'ai'
       : r.motion.interpolation === 'none' ? 'off' : 'classical';
-    el.createFps.value = r.output.fps ? String(r.output.fps) : 'source';
+    if (!keepLocks) el.createFps.value = r.output.fps ? String(r.output.fps) : 'source';
     el.createScene.checked = r.motion.sceneCutProtection !== false;
 
     // Aspect ratio, then resolution, then framing - read back in the same
     // three-part shape they are written in.
+    //
+    // `keepLocks` skips the first two: after AUTO CONFIGURE they are the
+    // user's own answers, which Auto has already built the recipe around.
+    // Writing them back would at best be a no-op and at worst would let a
+    // rounding difference move a control the user set.
     if (r.framing.enabled && r.framing.canvas && r.framing.canvas !== 'source') {
-      el.createAspect.value = [...el.createAspect.options].some((o) => o.value === r.framing.canvas)
-        ? r.framing.canvas : 'custom';
-      if (r.framing.canvas === 'custom') {
-        if (r.framing.aspectW) el.createAspectW.value = String(r.framing.aspectW);
-        if (r.framing.aspectH) el.createAspectH.value = String(r.framing.aspectH);
+      if (!keepLocks) {
+        el.createAspect.value = [...el.createAspect.options].some((o) => o.value === r.framing.canvas)
+          ? r.framing.canvas : 'custom';
+        if (r.framing.canvas === 'custom') {
+          if (r.framing.aspectW) el.createAspectW.value = String(r.framing.aspectW);
+          if (r.framing.aspectH) el.createAspectH.value = String(r.framing.aspectH);
+        }
       }
       // Read tracking back too. Losing it here is what made Auto announce
       // "Smart Reframe enabled" while the control underneath said centre crop
       // and the render obeyed the control.
       el.createFraming.value = framingChoiceFor(r.framing);
-    } else {
+    } else if (!keepLocks) {
       el.createAspect.value = 'source';
     }
 
-    const target = r.reconstruction.targetResolution;
-    if (target.mode === 'custom' && target.width && target.height) {
-      const wh = target.width + 'x' + target.height;
-      const suggestion = suggestedResolutionFor(currentAspect());
-      if (suggestion && suggestion.width === target.width && suggestion.height === target.height) {
-        // It is exactly what the ratio suggests, so leave it on automatic and
-        // let a later ratio change move it.
-        el.createRes.value = 'auto';
-      } else if ([...el.createRes.options].some((o) => o.value === wh)) {
-        el.createRes.value = wh;
+    if (!keepLocks) {
+      const target = r.reconstruction.targetResolution;
+      if (target.mode === 'custom' && target.width && target.height) {
+        const wh = target.width + 'x' + target.height;
+        const suggestion = suggestedResolutionFor(currentAspect());
+        if (suggestion && suggestion.width === target.width && suggestion.height === target.height) {
+          // It is exactly what the ratio suggests, so leave it on automatic and
+          // let a later ratio change move it.
+          el.createRes.value = 'auto';
+        } else if ([...el.createRes.options].some((o) => o.value === wh)) {
+          el.createRes.value = wh;
+        } else {
+          el.createRes.value = 'custom';
+          el.createResW.value = String(target.width);
+          el.createResH.value = String(target.height);
+        }
       } else {
-        el.createRes.value = 'custom';
-        el.createResW.value = String(target.width);
-        el.createResH.value = String(target.height);
+        el.createRes.value = 'source';
       }
-    } else {
-      el.createRes.value = 'source';
     }
 
-    el.createAudio.checked = r.audio.enabled;
+    el.createKeepAudio.checked = r.audio.enabled;
     el.createLoudness.checked = !!(r.audio.normalize && r.audio.normalize.enabled);
     el.createQuality.value = String(r.output.quality);
     el.createQualityVal.textContent = String(r.output.quality);
     // Remember the mastering choice: the panel has a loudness switch, not a
     // full mastering picker, so Auto's choice would otherwise be lost.
     state.audioMaster = r.audio.master || 'preserve';
-    syncPlatformUi();
+    if (!keepLocks) syncPlatformUi();
     syncGeometryUi();
     syncAiUi();
     schedulePreview();
@@ -2876,9 +3625,7 @@
   function markRecipeModified() {
     if (state.recipeState === 'auto') {
       state.recipeState = 'modified';
-      if (!el.autoState.textContent.includes('edited')) {
-        el.autoState.textContent = 'Applied · edited';
-      }
+      setAutoState('modified');
     }
   }
 
@@ -3079,6 +3826,66 @@
     el.createFramingHelp.hidden = !reshapes;
     refreshSemanticNote();
     refreshGroupTags();
+    updateCropGuide();
+  }
+
+  /* ------------------------------------------------------------------ *
+   * The crop guide
+   *
+   * A static rectangle over the source preview showing the shape the output
+   * will be. It is a guide, not a preview: no scaling, no enhancement, no
+   * tracking, and it says so on its own label. Smart Reframe moves this box
+   * during the render, which is exactly why the guide is drawn where a centred
+   * crop would sit and is never presented as the final framing.
+   *
+   * Cheap by construction - two divs and some arithmetic on a resize - because
+   * the one thing Create's preview must never do is start doing real work.
+   * ------------------------------------------------------------------ */
+
+  function updateCropGuide() {
+    const guide = el.createCropGuide;
+    if (!guide) return;
+
+    const aspect = currentAspect();
+    const video = el.createVideo;
+    const showable = state.workspace === 'create' && aspect &&
+      video.classList.contains('is-ready') && video.videoWidth > 0;
+    if (!showable) {
+      guide.hidden = true;
+      return;
+    }
+
+    const srcRatio = video.videoWidth / video.videoHeight;
+    const size = resolveGeometryChoice(aspect, suggestedResolutionFor(aspect));
+    const targetRatio = size ? size.width / size.height : aspect.ratio;
+    if (Math.abs(srcRatio - targetRatio) < 0.02) {
+      // Same shape: a box around the whole picture tells nobody anything.
+      guide.hidden = true;
+      return;
+    }
+
+    // Where the picture actually sits inside its element (object-fit: contain).
+    const rect = video.getBoundingClientRect();
+    const host = el.stageInner.getBoundingClientRect();
+    const shown = srcRatio > rect.width / rect.height
+      ? { w: rect.width, h: rect.width / srcRatio }
+      : { w: rect.height * srcRatio, h: rect.height };
+    const box = targetRatio > srcRatio
+      ? { w: shown.w, h: shown.w / targetRatio }
+      : { w: shown.h * targetRatio, h: shown.h };
+
+    const left = (rect.left - host.left) + (rect.width - box.w) / 2;
+    const top = (rect.top - host.top) + (rect.height - box.h) / 2;
+
+    guide.hidden = false;
+    const node = el.createCropGuideBox;
+    node.style.left = `${Math.round(left)}px`;
+    node.style.top = `${Math.round(top)}px`;
+    node.style.width = `${Math.round(box.w)}px`;
+    node.style.height = `${Math.round(box.h)}px`;
+    el.createCropGuideLabel.textContent = size
+      ? `${aspect.id} guide · ${size.width}×${size.height}`
+      : `${aspect.id} guide`;
   }
 
   /**
@@ -3144,8 +3951,8 @@
         container: (outputPath.split('.').pop() || 'mp4').toLowerCase()
       },
       audio: {
-        enabled: el.createAudio.checked,
-        mode: el.createAudio.checked ? 'encode' : 'none',
+        enabled: el.createKeepAudio.checked,
+        mode: el.createKeepAudio.checked ? 'encode' : 'none',
         // The panel exposes a loudness switch; Auto and the export presets can
         // pick a fuller mastering chain, and that choice is preserved here.
         master: el.createLoudness.checked
@@ -4146,6 +4953,172 @@
     api.settings.patch({ watchQuality: value });
   }
 
+  /* ------------------------------------------------------------------ *
+   * AUTO CONFIGURE (Watch)
+   *
+   * Same product idea as Create's, same words on the button, a completely
+   * different machine underneath. This writes realtime state only - a Look,
+   * the quality policy, adaptive quality, the render scale - and it cannot
+   * reach Create's recipe: the two go through different IPC calls into
+   * different modules, and this one has nothing to write a recipe with.
+   * ------------------------------------------------------------------ */
+
+  /**
+   * What Watch knows about the loaded source, in the shape the analyser
+   * produces.
+   *
+   * A local file has a real probe. A stream has the rendition yt-dlp actually
+   * selected, which reports its own width, height, fps and bitrate - real
+   * measured facts about the thing being played, not guesses. Anything absent
+   * stays absent so the decision engine can say "unknown" rather than invent.
+   */
+  function watchAnalysisForAuto() {
+    // A probed analysis when the player has one, the declared rendition
+    // otherwise. Both come out in the analyser's shape, which is what lets one
+    // decision engine read either.
+    return state.analysis || analysisFromRendition(state.media);
+  }
+
+  async function runWatchAuto() {
+    if (!state.media) return toast('Open a video in Watch first.', 'warn');
+    el.watchAutoBtn.disabled = true;
+    setWatchAutoStage('Analysing…');
+
+    const stats = state.engine ? state.engine.stats : null;
+    const looks = [...BUILTIN, ...Object.values(state.userPresets)].map((p) => p.id);
+    setWatchAutoStage('Building settings…');
+
+    const res = await api.auto.watch({
+      analysis: watchAnalysisForAuto(),
+      profile: el.watchAutoProfile.value,
+      sourceKind: state.media.kind === 'stream' ? 'stream' : 'local',
+      machine: {
+        // The renderer is the only place that knows what the GL context is
+        // actually running on, so it is the only honest source for this.
+        gpu: stats ? stats.gpu : null,
+        cores: navigator.hardwareConcurrency || null,
+        memoryBytes: navigator.deviceMemory ? navigator.deviceMemory * 1024 * 1024 * 1024 : null
+      },
+      /*
+       * Live evidence, when there is any that means anything.
+       *
+       * The first second or two of playback drops frames on almost any
+       * machine - the decoder is filling its queue and the GPU is compiling
+       * shaders - and letting that spike define the whole session would pin
+       * a capable machine to Performance for a video it could have run at
+       * Quality. So the drop rate only counts once playback has settled.
+       */
+      playback: stats && stats.fps && el.video.currentTime > 3
+        ? { dropRate: stats.dropRate || 0, limited: !!stats.limited, fps: stats.fps }
+        : null,
+      availableLooks: looks
+    });
+
+    el.watchAutoBtn.disabled = false;
+    setWatchAutoStage(null);
+    if (!res.ok) {
+      el.watchAutoState.textContent = 'Failed';
+      return reportFailure(res, 'Watch could not configure itself for this source.');
+    }
+
+    applyWatchAuto(res);
+    renderWatchAutoResult(res);
+  }
+
+  /**
+   * Apply the decision through the same controls a user would use.
+   *
+   * Nothing here is a second copy of the realtime state: every line writes the
+   * existing control and the existing setter, so Fine Tune, the Looks grid and
+   * the Realtime Engine module all show the chosen values immediately.
+   */
+  function applyWatchAuto(res) {
+    const preset = findPreset(res.look);
+    if (preset) applyParams(preset.params, preset.id);
+
+    setWatchQuality(res.quality);
+
+    el.adaptiveToggle.checked = !!res.adaptive;
+    if (state.engine) state.engine.setAdaptive(!!res.adaptive);
+    api.settings.patch({ adaptiveQuality: !!res.adaptive });
+
+    el.scaleSelect.value = String(res.renderScale);
+    if (state.engine) {
+      state.engine.setRenderScaleCap(res.renderScale === 'auto' ? 'auto' : Number(res.renderScale));
+    }
+    api.settings.patch({ renderScale: res.renderScale });
+    updateResBadge();
+    refreshLookReadouts();
+  }
+
+  function setWatchAutoStage(text) {
+    el.watchAutoStage.hidden = !text;
+    el.watchAutoStage.textContent = text || '';
+    el.watchAutoBtn.classList.toggle('is-working', !!text);
+  }
+
+  const WATCH_QUALITY_LABEL = {
+    auto: 'Auto', performance: 'Performance', balanced: 'Balanced',
+    quality: 'Quality', maximum: 'Maximum'
+  };
+
+  function renderWatchAutoResult(res) {
+    el.watchAutoState.textContent = 'Configured';
+    el.watchAutoState.classList.add('ready');
+    el.watchAutoBtn.classList.remove('is-armed');
+
+    const host = el.watchAutoResult;
+    host.hidden = false;
+    host.innerHTML = '';
+    const row = (title, value) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'auto-block-row';
+      const h = document.createElement('span');
+      h.className = 'auto-block-title';
+      h.textContent = title;
+      const b = document.createElement('b');
+      b.textContent = value;
+      wrap.append(h, b);
+      host.appendChild(wrap);
+    };
+    row('Look', res.lookLabel);
+    row('Realtime quality', WATCH_QUALITY_LABEL[res.quality] || res.quality);
+    row('Adaptive quality', res.adaptive ? 'On' : 'Off');
+    if (res.source && res.source.label) row('Source', res.source.label);
+
+    el.watchAutoWhy.hidden = false;
+    el.watchAutoExplain.innerHTML = '';
+    for (const line of res.reasons) {
+      const p = document.createElement('p');
+      p.className = 'auto-line';
+      p.textContent = line;
+      el.watchAutoExplain.appendChild(p);
+    }
+    for (const line of res.warnings) {
+      const p = document.createElement('p');
+      p.className = 'auto-line warn';
+      p.textContent = line;
+      el.watchAutoExplain.appendChild(p);
+    }
+    // Realtime processing that cannot be sustained is the one failure Watch
+    // must never choose deliberately, so Auto says which way it erred.
+    const note = document.createElement('p');
+    note.className = 'auto-line';
+    note.textContent = 'Motion comes first: adaptive quality lowers the render resolution ' +
+      'when the GPU cannot keep up, and raises it again when there is headroom.';
+    el.watchAutoExplain.appendChild(note);
+  }
+
+  /** A new video makes the previous realtime decision about a different clip. */
+  function markWatchAutoStale() {
+    if (!el.watchAutoState) return;
+    el.watchAutoState.classList.remove('ready');
+    el.watchAutoState.textContent = state.media ? 'Ready' : 'No source';
+    el.watchAutoResult.hidden = true;
+    el.watchAutoWhy.hidden = true;
+    el.watchAutoBtn.classList.toggle('is-armed', !!state.media);
+  }
+
   /* ---- Operations console -------------------------------------------- */
 
   /** Which reading of the job list the console is showing. */
@@ -4267,19 +5240,38 @@
    */
   function refreshConsoleEngines() {
     if (!el.consoleEngines) return;
+    /*
+     * Two different things, said as two different things.
+     *
+     * Real-ESRGAN and RIFE are render engines: they execute during a job.
+     * Face and person detection is an optional service that informs a decision
+     * Smart Reframe makes. Counting all three as "3/3" beside a "2/2" on the
+     * Create panel is not wrong so much as unexplained, and an unexplained
+     * pair of fractions reads as a bug.
+     */
     const rows = [
+      ['group', 'Render engines'],
       ['Real-ESRGAN', engineState('realesrgan')],
       ['RIFE', engineState('rife')],
+      ['group', 'AI services'],
       ['Face & person detection', state.semantic
         ? (state.semantic.status === 'ready' ? 'installed' : 'not installed')
         : 'checking']
     ];
 
-    const ready = rows.filter(([, s]) => s === 'installed').length;
-    el.consoleEngineTag.textContent = `${ready}/${rows.length}`;
+    const states = rows.filter(([name]) => name !== 'group');
+    const ready = states.filter(([, s]) => s === 'installed').length;
+    el.consoleEngineTag.textContent = `${ready}/${states.length} ready`;
 
     el.consoleEngines.innerHTML = '';
     for (const [name, status] of rows) {
+      if (name === 'group') {
+        const head = document.createElement('div');
+        head.className = 'eng-group';
+        head.textContent = status;
+        el.consoleEngines.appendChild(head);
+        continue;
+      }
       const row = document.createElement('div');
       row.className = 'eng-row';
       const dot = document.createElement('span');
@@ -4525,7 +5517,15 @@
       el.sbRender.classList.remove('is-active');
     }
 
-    el.sbDevice.textContent = deviceName();
+    // Named for the job it does. The performance bay shows the *render* GPU,
+    // which is a different adapter on this class of machine, and an unlabelled
+    // pair of different names reads as a contradiction.
+    const realtime = deviceName();
+    el.sbDevice.textContent = realtime ? `Realtime GPU · ${realtime}` : '';
+    el.sbDevice.title = realtime
+      ? `Realtime enhancement is running on ${realtime}. Offline renders use the render GPU ` +
+        'shown under System performance, which may be a different adapter.'
+      : '';
   }
 
   /**
@@ -4784,6 +5784,7 @@
     telemetry.refreshVisibility();
     // The canvas size follows the stage, which just changed.
     requestAnimationFrame(positionSplitHandle);
+    requestAnimationFrame(updateCropGuide);
   }
 
   /* ------------------------------------------------------------------ *
@@ -4903,6 +5904,11 @@
       });
     });
     el.createAudio.addEventListener('error', () => createPreview.recoverFromAudioFailure());
+
+    // The crop guide is geometry over a picture, so it is repositioned only
+    // when one of those two things actually changes.
+    v.addEventListener('loadedmetadata', updateCropGuide);
+    window.addEventListener('resize', updateCropGuide);
 
     el.createEmptyOpenBtn.addEventListener('click', createOpenFile);
     el.createEmptyWatchBtn.addEventListener('click', createUseWatchSource);
@@ -5039,7 +6045,9 @@
     });
     el.createPlatform.addEventListener('change', () => {
       syncPlatformUi({ seedGeometry: true });
-      markRecipeModified();
+      // The target is a lock, not an ordinary setting: changing it changes the
+      // question Auto was answering.
+      markAutoStale();
       schedulePreview();
     });
     el.createAi.addEventListener('change', syncAiUi);
@@ -5071,23 +6079,47 @@
     });
     el.analyseBtn.addEventListener('click', analyseSource);
     el.autoBuildBtn.addEventListener('click', runAuto);
+    el.watchAutoBtn.addEventListener('click', runWatchAuto);
+    el.watchAutoProfile.addEventListener('change', () => {
+      if (state.media) el.watchAutoBtn.classList.add('is-armed');
+    });
     el.createPreset.addEventListener('change', () => applyCreatorPreset(el.createPreset.value));
 
-    // Create's own source actions. None of them touch the video element.
+    // Create's own source actions. None of them touch the video element, and
+    // all four of them end at the same `setCreateSource()`.
     el.createOpenFileBtn.addEventListener('click', createOpenFile);
     el.createUseWatchBtn.addEventListener('click', createUseWatchSource);
     el.createUrlBtn.addEventListener('click', createOpenUrl);
+    el.createUrlToggleBtn.addEventListener('click', openUrlEntry);
+    el.createUrlCancelBtn.addEventListener('click', closeUrlEntry);
+    el.createChangeSourceBtn.addEventListener('click', () =>
+      refreshSourceModuleState({ picking: true }));
     el.createUrlInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') createOpenUrl();
+      if (e.key === 'Escape') closeUrlEntry();
     });
 
+    /*
+     * Two different meanings, so two different reactions.
+     *
+     * An advanced control is Auto's own output being edited: the result stays,
+     * and the chip says it has been edited. A *lock* is the requirement
+     * itself changing, which makes Auto's previous answer an answer to a
+     * different question - so the button re-arms and nothing is recomputed
+     * until it is pressed. Recomputing on every keystroke would fight the
+     * person still choosing.
+     */
     for (const control of [el.createAi, el.createAiModel, el.createAiQuality, el.createInterp,
-      el.createRes, el.createAspect, el.createFps, el.createFraming, el.createAudio,
-      el.createLoudness, el.createQuality]) {
+      el.createFraming, el.createKeepAudio, el.createLoudness, el.createQuality]) {
       control.addEventListener('change', markRecipeModified);
     }
+    for (const control of [el.createRes, el.createAspect, el.createFps]) {
+      control.addEventListener('change', markAutoStale);
+    }
+    el.autoProfile.addEventListener('change', markAutoStale);
+    el.autoIntensity.addEventListener('change', markAutoStale);
     // Every control that a section summary or the render summary reports on.
-    for (const control of [el.createAudio, el.createLoudness, el.createUseLook,
+    for (const control of [el.createKeepAudio, el.createLoudness, el.createUseLook,
       el.createFps, el.createInterp, el.createFraming, el.createPlatform,
       el.createAi, el.createAiQuality, el.createAspect, el.createRes]) {
       control.addEventListener('change', refreshGroupTags);
@@ -5098,7 +6130,7 @@
     }
     for (const input of [el.createAspectW, el.createAspectH, el.createResW, el.createResH]) {
       input.addEventListener('input', () => {
-        markRecipeModified();
+        markAutoStale();
         syncGeometryUi();
         schedulePreview();
       });
@@ -5322,6 +6354,10 @@
 
     refreshStatusBar();
     refreshWatchSource();
+    // Both Auto Configure blocks open in the same state: nothing to configure
+    // yet, and nothing claimed.
+    setAutoState('custom');
+    markWatchAutoStale();
     renderRecents(recentsRes.ok ? recentsRes.recents : []);
     populateEncoders();
     await populatePlatforms();

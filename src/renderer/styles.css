@@ -888,6 +888,51 @@ body[data-workspace="create"] #transport { display: none; }
 body[data-workspace="create"] #createVideo.is-ready { display: block; }
 body[data-workspace="create"] #createTransport { display: block; }
 
+/* Create's overlays belong to Create.
+   They are toggled by the `hidden` attribute, which follows the *preview's*
+   state and knows nothing about which workspace is on screen — so a ready
+   Create preview left its badge sitting over Watch's live picture, where
+   "source preview · final processing is applied during render" is simply not
+   true. These rules only ever hide: `[hidden]` still wins inside Create. */
+body:not([data-workspace="create"]) #createPreviewBadge,
+body:not([data-workspace="create"]) #createPreviewError,
+body:not([data-workspace="create"]) #createEmpty,
+body:not([data-workspace="create"]) .crop-guide { display: none; }
+
+/* ── The crop guide ───────────────────────────────────────────────────
+   The output shape, drawn over the source picture. It is a *guide*: no
+   scaling, no enhancement, no tracking, and it labels itself so it can never
+   be read as a preview of the render. Smart Reframe moves this rectangle
+   during the render; here it sits where a centred crop would.
+
+   Only Create shows it, only when the shapes actually differ, and it never
+   takes a pointer event — the picture underneath is still the transport. */
+.crop-guide {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+.crop-guide-box {
+  position: absolute;
+  border: 1px solid var(--accent-line);
+  box-shadow: 0 0 0 9999px rgba(5, 6, 7, 0.34);
+  border-radius: 2px;
+}
+.crop-guide-box span {
+  position: absolute;
+  left: 0; bottom: -19px;
+  padding: 2px 6px;
+  background: rgba(5, 6, 7, 0.78);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
 /* The label that keeps the promise honest: this is the source, not the
    render. Sits over the picture rather than taking a row of its own. */
 .preview-badge {
@@ -2733,6 +2778,195 @@ body[data-workspace="library"] .thumb .thumb-fallback svg { max-width: 58px; wid
   color: var(--text-secondary);
 }
 .auto-line.warn { border-left-color: var(--warning); color: var(--warning); }
+
+/* ── AUTO CONFIGURE ────────────────────────────────────────────────────
+   The simple path, in both workspaces. Two blocks at the top of the panel:
+   what the output has to be, and one button that works out how to get there.
+   Everything below them is the same workstation it always was, one
+   disclosure away.
+
+   The visual weight is deliberate. This is the only accent-filled button in
+   the inspector besides the render action itself, because on a panel where
+   everything looks equally important a beginner has nowhere to start. */
+
+.simple-block { margin-bottom: 10px; }
+.simple-block .module-head { background: var(--surface-raised); }
+
+.auto-block .btn.lg {
+  height: 36px;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+/* "This is live again" — the locks changed, so the previous answer was to a
+   different question. A ring, not an animation: nothing in this app moves
+   unless the user did something. */
+.btn.is-armed {
+  box-shadow: 0 0 0 1px var(--accent-line);
+}
+.btn.is-working { opacity: 0.7; }
+
+.auto-stage {
+  margin-top: 7px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+
+/* The result. Every row is read back off the recipe that was produced, so
+   this block is empty until there is one. */
+.auto-result {
+  margin-top: 10px;
+  padding: 9px 10px;
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.auto-block-row {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 3px 0;
+}
+.auto-block-row + .auto-block-row { border-top: 1px solid var(--border-subtle); }
+.auto-block-title {
+  flex: none;
+  width: 88px;
+  font-size: 9.5px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.auto-block-row > b {
+  font-size: 11.5px;
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.auto-chose { list-style: none; display: grid; gap: 4px; }
+.auto-chose li { display: flex; flex-direction: column; gap: 1px; }
+.auto-chose strong { font-size: 11.5px; color: var(--text); font-weight: 600; }
+.auto-chose em {
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+/* What could not be done, and the one action that would fix it. */
+.auto-unmet { margin-top: 9px; display: grid; gap: 8px; }
+.auto-unmet-row {
+  padding: 8px 10px;
+  background: var(--warning-soft);
+  border: 1px solid rgba(217, 164, 65, 0.3);
+  border-radius: var(--radius-sm);
+}
+.auto-unmet-row strong {
+  display: block;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--warning);
+  margin-bottom: 3px;
+}
+.auto-unmet-row p {
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.auto-unmet-row .btn { margin-top: 7px; }
+
+/* Configured, the block stops selling itself: no explanatory sentence, no
+   accent call to action, just the answer and a quiet way to run it again. */
+.auto-block.is-configured .btn.full { margin-top: 10px; }
+.auto-block.is-configured .auto-result { margin-top: 0; }
+
+/* ── Create's source module ────────────────────────────────────────────
+   One module, two states. The card and the picker never appear together,
+   and the URL box is never left under an already-loaded source. */
+
+.create-source-card {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 0 0;
+}
+.create-source-card .source-card-body { min-width: 0; }
+.source-kind {
+  display: inline-block;
+  margin: 3px 0;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.source-kind.online { color: var(--accent); }
+#createChangeSourceBtn { margin-top: 10px; }
+
+.source-picker { padding-top: 10px; }
+.source-picker .create-source-actions { margin-top: 8px; }
+.link-btn.wide { display: block; width: 100%; margin-top: 8px; text-align: center; }
+
+.source-url-entry { padding-top: 10px; }
+.source-url-entry label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.source-url-entry .input { width: 100%; }
+.source-url-entry .create-source-actions { margin-top: 8px; }
+.source-url-entry .field-help.warn { color: var(--warning); margin-top: 8px; }
+
+/* The four facts worth permanent space. The rest is one disclosure away. */
+.analysis-brief {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 9px 0 2px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+.analysis-brief span + span::before {
+  content: '·';
+  margin-right: 10px;
+  color: var(--text-disabled);
+}
+.analysis-brief em {
+  flex-basis: 100%;
+  font-style: normal;
+  font-family: var(--sans, inherit);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* Recents keep working and stop competing. */
+.col-module.is-quiet { opacity: 0.62; }
+.col-module.is-quiet:hover,
+.col-module.is-quiet:focus-within { opacity: 1; }
+
+/* Engines and services are different claims, so they are grouped as such. */
+.eng-group {
+  padding: 8px 0 4px;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.eng-group:first-child { padding-top: 0; }
+
+/* The full workstation, folded away rather than removed. */
+.advanced-shell { margin-bottom: 14px; }
+.advanced-shell > summary { height: 36px; color: var(--text-secondary); }
+.advanced-shell-body { padding: 11px; }
+.advanced-shell-body > .module:last-child,
+.advanced-shell-body > .group:last-child { margin-bottom: 0; }
 
 /* AI block */
 .ai-block {

@@ -71,7 +71,14 @@ contextBridge.exposeInMainWorld('visionance', {
 
   auto: {
     profiles: () => invoke('auto:profiles'),
-    build: (request) => invoke('auto:build', request)
+    build: (request) => invoke('auto:build', request),
+    /** AUTO CONFIGURE for Create: user locks in, a full recipe and its account out. */
+    configure: (request) => invoke('auto:configure', request),
+    /**
+     * AUTO CONFIGURE for Watch. A separate call over a separate module: it
+     * configures realtime state only and can never write a Create recipe.
+     */
+    watch: (request) => invoke('watch:auto', request)
   },
 
   creatorPresets: {

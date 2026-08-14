@@ -386,8 +386,10 @@ app.whenReady().then(() => {
       ['WebGL2 context created', result.glContext],
       ['built-in presets defined', result.presets >= 8],
       ['preset cards rendered', result.presetCards >= 8],
-      ['adjust sliders rendered', result.sliders >= 15],
-      ['watch/create/queue/library tabs rendered', result.tabs === 5],
+      ['fine tune sliders rendered', result.sliders >= 15],
+      ['create/watch/queue/library tabs rendered',
+        result.tabs === 4 &&
+        (result.tabNames || []).join(',') === 'create,presets,queue,library'],
       ['empty state visible', result.emptyStateVisible],
       ['platform targets populated', result.platformOptions >= 5],
       ['app.info over IPC', result.appInfo === true],

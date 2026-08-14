@@ -25,9 +25,11 @@ main process (Node)                          renderer (no Node access)
 ├── preload.js         the only bridge  <──> ├── js/engine.js WebGL2 pipeline
 │                                            ├── js/shaders.js
 ├── store.js           settings/presets      ├── js/presets.js
-├── binaries.js        ffmpeg/ffprobe/yt-dlp ├── js/app.js    UI wiring
+├── binaries.js        ffmpeg/ffprobe/yt-dlp ├── js/ui-kit.js icons, popover
+├── thumbnails.js      one poster per source ├── js/thumbs.js thumbnail identity
+├── telemetry.js       measured machine load ├── js/telemetry-ui.js graph
+├── logger.js          structured logging    ├── js/app.js    UI wiring
 │                                            └── js/playback-stats.js  pacing
-├── logger.js          structured logging
 ├── errors.js          structured errors + redaction
 ├── capabilities.js    what this machine can do
 ├── media-analyzer.js  ffprobe -> normalised analysis
@@ -45,9 +47,13 @@ main process (Node)                          renderer (no Node access)
 │   ├── process.js         running ncnn tools; OOM and Vulkan detection
 │   ├── frames.js          per-chunk frame decode/encode
 │   ├── scenes.js          hard-cut detection
-│   ├── tracking.js        Smart Reframe saliency + crop trajectory
+│   ├── tracking.js        Smart Reframe: saliency + semantic + trajectory
+│   ├── detector.js        ONNX face/person inference (optional, CPU)
+│   ├── subject-track.js   identity, election, composition (pure)
+│   ├── semantic-samples.js  streaming frame source for detection
+│   ├── semantic-manager.js  model download/status/removal
 │   ├── interpolation-plan.js  cut-safe frame timing (pure)
-│   └── engines/           realesrgan.js, rife.js
+│   └── engines/           realesrgan.js, rife.js, semantic.js
 ├── ffmpeg/
 │   ├── encoders.js    catalogue, detection, selection
 │   ├── filters.js     recipe -> filter graph
@@ -132,6 +138,101 @@ knows nothing about Real-ESRGAN or RIFE.
 Progress is weighted across `pass` stages only, and a neural stage carries a
 much larger weight than the same stage done as a filter (`neuralWeight`),
 because it genuinely dominates the render.
+
+---
+
+## The interface
+
+Four workspaces behind one top-level navigation: **Create**, **Watch**,
+**Queue**, **Library**. Create and Watch keep the player on screen, because both
+are about a picture you are looking at. Queue and Library are documents, so the
+stage steps aside and they take the window.
+
+Create is the opening workspace, and `setWorkspace('create')` at the end of
+`boot()` is what makes it so. That call is the single authority for which
+workspace is active: the markup's `data-workspace` attribute and `.tab.active`
+class are a first-paint hint only. Leaving the initial state to the markup is
+what produced the hydration defect where a fresh launch showed an empty
+inspector until the user visited a second workspace and came back — because
+nothing had given any `.tab-page` its `.active` class or cleared the `hidden`
+attribute on the source column, the process strip and the console.
+
+There was a fifth workspace, **Adjust**, holding the enhancement parameters.
+Its controls are unchanged but now live in Watch as the collapsible **Fine
+Tune** section, because a realtime look is not a separate task from watching.
+`presets` remains Watch's internal workspace id.
+
+Navigation never touches the media element. `setWorkspace()` writes a
+`data-workspace` attribute on `<body>` and toggles the visible panel; playback,
+the source lifecycle and the presentation mode remain owned by
+`switchSource()` and `applyPresentationMode()`. When the stage is not composited
+the browser stops issuing `requestVideoFrameCallback`, so the engine's loop goes
+quiet on its own without anything having to stop it — which is why a workspace
+change cannot disturb the frame-pacing guarantees below.
+
+### The UI's own cost
+
+Visionance's budget belongs to decode, shaders, ffmpeg and the neural engines.
+The interface is built not to compete with them:
+
+- **No ambient animation.** No particles, no gradient loops, no decorative
+  canvas. The only animations are a spinner while a source resolves, and
+  120–170 ms transitions on things the user just touched.
+- **Nothing redraws per frame.** The diagnostics overlay writes twice a second
+  and only while it is open — its interval is cleared outright when it is
+  closed, not left running against a hidden element. Housekeeping runs at 3 s.
+  The telemetry graph redraws once per sample.
+- **Hidden means stopped.** Telemetry samples only when a view is on screen
+  *and* `document.visibilityState === 'visible'`; the diagnostics interval and
+  the graph both stop when the window is hidden.
+- **Lists are bounded.** The Queue always shows active jobs and windows the
+  finished ones twenty at a time. No virtualisation library.
+
+### Thumbnail identity
+
+A source has exactly one thumbnail, and every surface that shows that source
+shows the same image. `thumbnails.js` derives a cache key from the source
+string — the absolute path, lowercased, or the page URL — so the Watch tab, the
+Create panel, a persisted job and a recents row all resolve to the same key
+without having to agree on anything else.
+
+- **Local files** are extracted with one ffmpeg call at ~25% of the duration.
+  Frame zero is the worst possible choice: edits open on black, a slate or a
+  fade. If that frame's mean luma is under 10 the extractor tries one
+  deterministic fallback at 55% and then accepts what it got. Two attempts
+  maximum — this is a thumbnail, not a key-frame search.
+- **Online sources** reuse the poster URL yt-dlp already returned when it
+  resolved the page, fetched once with a 4 MB ceiling. The URL is recorded in
+  recents so the Library never has to re-resolve a page to draw a card.
+- **The cache** lives in `userData/cache/thumbnails`, written through a temp
+  file and renamed, so a reader sees either no file or a complete one. It is
+  served over `vs://app/__thumb?k=<key>` with an immutable `Cache-Control`; the
+  renderer only ever holds an opaque key and cannot ask for an arbitrary file.
+- **Asking twice is the thing being prevented.** `js/thumbs.js` keeps one map
+  from identity to resolved URL, so re-rendering the Queue costs a lookup, not
+  an IPC round trip, and a source that failed is never retried on the next
+  render pass. `verify:ui` asserts both properties.
+
+### Telemetry
+
+`telemetry.js` samples every 2 s, and only while the renderer says a panel is
+subscribed. With no subscribers the interval is cleared rather than left
+ticking.
+
+Everything reported is measured:
+
+| Metric | Source | When it is `null` |
+|---|---|---|
+| Visionance CPU share | `app.getAppMetrics()`, divided by core count | never |
+| Visionance / system memory | app metrics, `process.getSystemMemoryInfo()` | never |
+| GPU utilisation and VRAM | `nvidia-smi`, probed once | on any machine without it |
+
+There is no cross-vendor API for GPU utilisation, so on AMD and Intel the field
+is `null`, the panel says so, and the graph plots the application's own CPU
+share under its own label. Temperature, power and clock are not reported at all,
+because nothing here measures them. The probe runs once: a panel that shells out
+every two seconds looking for a binary that is not installed would be exactly
+the ambient cost this design avoids.
 
 ---
 
@@ -465,6 +566,84 @@ what the Smart Reframe row produces. Changing the control by hand marks an Auto
 result as edited, and the Queue card reports the backend that actually ran and
 the confidence it reached - never "AI framing".
 
+### The semantic layer
+
+Saliency answers "where is the motion and detail". Most footage people reframe
+asks a different question: "where is the person". On real user footage the
+saliency tracker reported 6 tracked samples out of 40 - it was working
+correctly and answering the wrong question, because a presenter standing still
+has less motion energy than the trees behind them.
+
+So `ai/detector.js` adds face and person detection *above* saliency, and
+saliency stays exactly where it was. The priority is:
+
+```
+manual > stable face > stable person > semantic track > saliency > hold > centre
+```
+
+**Backend.** ONNX Runtime (`onnxruntime-node`, MIT) executing two models from
+OpenCV Zoo: YuNet for faces (227 KB, MIT) and NanoDet-Plus for people (3.6 MB,
+Apache-2.0). Four megabytes of weights, CPU inference, no Python, no CUDA. The
+runtime publishes its binding against **N-API v6**, which is ABI-stable, so it
+loads in packaged Electron with no rebuild - verified on Electron 43.2.0 /
+Node 24.18.0. That removes the single biggest packaging risk in the feature.
+
+Everything about these models was determined by *running* them rather than from
+documentation, because two of the four facts were wrong in memory:
+
+| | measured |
+|---|---|
+| YuNet input | fixed **640x640** (not dynamic), **BGR**, raw 0-255 |
+| YuNet outputs | `cls_/obj_/bbox_/kps_` at strides 8/16/32; score is `sqrt(cls*obj)` |
+| NanoDet input | fixed **416x416**, **BGR**, ImageNet mean/std - the graph does *not* normalise |
+| NanoDet outputs | `[1,N,80]` classes + `[1,N,32]` GFL distribution, strides 8/16/32, class 0 is person |
+
+Feeding NanoDet raw 0-255 does not fail: it finds a portrait's person box at
+stride 8 (a small object) instead of stride 32 (a large one). It degrades
+quietly, which is why the preprocessing is pinned by comment and by test.
+
+**Sampling.** One ffmpeg pass emits letterboxed 640x640 RGB frames at an
+interval chosen by `planSemanticSampling()`: the saliency grid rate for short
+clips, stretched for long ones so no source exceeds ~150 detections. Frames are
+inferred one at a time with the decoder paused in between, so peak memory is
+one 1.2 MB frame rather than the whole clip - this runs on an 8 GB laptop.
+
+**Identity.** `ai/subject-track.js` is pure arithmetic over boxes and holds the
+policy: faces are fused into the person box that contains them, detections are
+associated to tracks by overlap, proximity and size, and one track is elected
+subject with hysteresis (`switchMargin` and `switchHold` per profile). Choosing
+the highest-confidence box each frame is what makes automatic reframing
+ping-pong between two speakers; the election is deliberately reluctant, most
+of all for `dialogue` and `gaming` - a webcam face is not the subject of a
+gameplay clip.
+
+Losing the face keeps the person track, so a turned head is not a new human. A
+hard cut calls `reset()`: identity does not survive a cut, and the crop snaps
+to the new shot rather than gliding into it.
+
+**Composition** is not "centre the face". Two tracks that both fit inside the
+crop are framed together, and the eye landmarks give look-room in the direction
+the subject faces.
+
+**Fallback is total.** A missing runtime, missing models, a truncated model, a
+load failure or an inference error all end the same way: the saliency samples
+are untouched, a readable note is added, and the render proceeds. Semantic
+tracking is an improvement to a working feature, never a dependency of it.
+`verify:reframe` asserts each of those paths.
+
+**Measured**, reference laptop (i5-10xxx, GTX 1650 Ti, 8 GB), 6-second 1080p
+fixtures, a stationary person against a moving `testsrc2` background:
+
+```
+                   backend                 tracked  coverage  conf   crop centre  analysis
+saliency only      Motion & detail          24/24     1.00    21%       0.614       1.7 s
+semantic           Face tracking            24/24     1.00    92%       0.833       5.3 s
+```
+
+The person stands at ~0.83. Both "tracked" everything; only one tracked the
+person. On a plain background the two agree (0.251 vs 0.261) - the semantic
+layer does not improve the easy case, it fixes the hard one.
+
 ### One account of what the tracker did
 
 The queue could report `crop follows the subject across 40 positions (100%
@@ -493,6 +672,21 @@ describing the same run in different vocabularies:
 | `confidence` | mean confidence **of the tracked samples only** |
 | `scenes` | `cuts + 1` |
 | `outcome` | `tracked` (>=60% coverage), `partial` (>=25%), `centred` |
+| `faceSamples` / `personSamples` / `saliencySamples` | which signal decided each tracked sample |
+| `semanticSamples` | `faceSamples + personSamples` |
+| `primaryBackend` | derived from those counts, never from what is installed |
+
+A second invariant joins the first:
+
+```
+tracked + held + centred === samples
+faceSamples + personSamples + saliencySamples === tracked
+```
+
+`primaryBackendFor()` names the backend from the counts. When saliency
+contributed at least a fifth of the tracked samples the label becomes
+`Semantic + saliency` rather than a detector's name, because at that point the
+viewer is watching a crop that saliency substantially decided.
 
 `tracked + held + centred === samples`, always. `held` and `centred` are nested
 in the raw counters (`fallbacks` is a subset of `holds`) and are un-nested
@@ -898,6 +1092,16 @@ re-resolves with the policy that worked last time.
 - Renderer assets *and* media are served over one custom `vs://app` scheme.
   Same-origin media matters: a cross-origin `<video>` would taint the WebGL
   canvas and make reading enhanced frames impossible.
+- **Local media is served with real byte ranges.** `serveLocalFile()` parses the
+  `Range` header itself and answers `206` with `Content-Range`, `Content-Length`
+  and `Accept-Ranges: bytes`, streaming exactly the requested window with
+  `fs.createReadStream({ start, end })`. This used to forward the path to
+  `net.fetch` as a `file://` URL, which replies with the whole body and status
+  `200` and no range headers at all — so Chromium concluded the resource was not
+  seekable, `video.seekable` stayed empty, and assigning `currentTime` snapped
+  straight back. Local files could be played but never scrubbed. An
+  unsatisfiable range is a `416`, not a silent full body, because a `200` there
+  desynchronises the demuxer. `npm run verify:seek` holds all of it.
 - Asset paths are re-checked after joining, and job workspaces reject path
   traversal and malformed job ids.
 - Certificate verification is on. `--no-check-certificate` was removed.
@@ -946,4 +1150,6 @@ unless `VISIONANCE_LOG=debug`.
 | `npm run verify:ai` | Interpolation timing across nine real frame rates, cut handling, engine lifecycle, OOM/Vulkan interpretation, GPU ranking, disk estimation - then **real** Real-ESRGAN and RIFE inference on tiny clips, including the RED/BLUE cut fixture. Prints whether the real half ran. |
 | `npm run verify:creator` | Auto's decisions against nine source shapes, Smart Reframe trajectories (subject left/right, hard cut, lost detections, no detections, profile responsiveness), colour and audio chains, export presets, then real renders including a 9:16 Smart Reframe and each mastering preset. |
 | `npx electron tools/verify-playback.js` | Frame pacing on real media: dropped frames, cadence, jitter and buffer for native, enhanced and compare passes. |
+| `npm run verify:ui` | Boots the app and drives the real interface: every workspace, the player controls and settings popover, both presentation paths, the Create form, the Queue's job row and its disclosure, the Library, every Settings section, thumbnail identity and cache reuse, telemetry subscription and pausing, hidden-state correctness, and narrow-window behaviour including control overlap. Writes one screenshot per workspace to `tools/ui-shots/`. |
+| `npm run verify:seek` | Local playback and scrubbing on a real 60-second clip: that the protocol advertises `Accept-Ranges` and answers `206`/`416` correctly, that the media element reports a seekable range covering the file, that seeks forward, backward and from the scrubber all land where asked, that playback resumes from them, and that the native enhancement-off path still seeks and still plays smoothly. |
 | `npm run verify:app` | Boots the app and drives the preload bridge; with `VISIONANCE_TEST_VIDEO` it decodes a clip through `vs://` and runs a complete render over IPC, and with `VISIONANCE_TEST_URL` it resolves a real public link and asserts picture *and* sound advance. |

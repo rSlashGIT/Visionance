@@ -16,7 +16,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { pathToFileURL } = require('url');
+const { Readable } = require('stream');
 const {
   app,
   BrowserWindow,
@@ -43,6 +43,9 @@ const streamPolicy = require('./stream-policy');
 const streamProxy = require('./stream-proxy');
 const { JobManager } = require('./jobs/job-manager');
 const { EngineManager } = require('./ai/engine-manager');
+const { SemanticManager } = require('./ai/semantic-manager');
+const { Thumbnails } = require('./thumbnails');
+const { Telemetry } = require('./telemetry');
 const jsRuntime = require('./js-runtime');
 const { detectEncoders } = require('./ffmpeg/encoders');
 const { VisionanceError, CODES, toStructured } = require('./errors');
@@ -97,6 +100,9 @@ let store = null;
 let jobs = null;
 let streams = null;
 let engines = null;
+let semanticModels = null;
+let thumbnails = null;
+let telemetry = null;
 let sleepBlockerId = null;
 /** Per-leg transfer accounting, so buffering complaints have numbers behind them. */
 const transferStats = new streamProxy.TransferStats();
@@ -113,6 +119,31 @@ const MIME = {
 };
 
 const VIDEO_EXTS = ['mp4', 'mkv', 'webm', 'mov', 'avi', 'wmv', 'flv', 'm4v', 'ts', 'mpg', 'mpeg', 'm2ts', 'ogv', '3gp'];
+
+/**
+ * Container types for local playback.
+ *
+ * Chromium sniffs the container anyway, but the media element uses the declared
+ * type when it decides whether a source is worth attaching at all, and
+ * `application/octet-stream` is the value most likely to get a file rejected
+ * before a single byte is demuxed.
+ */
+const VIDEO_MIME = {
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.mkv': 'video/x-matroska',
+  '.webm': 'video/webm',
+  '.ogv': 'video/ogg',
+  '.avi': 'video/x-msvideo',
+  '.wmv': 'video/x-ms-wmv',
+  '.flv': 'video/x-flv',
+  '.ts': 'video/mp2t',
+  '.m2ts': 'video/mp2t',
+  '.mpg': 'video/mpeg',
+  '.mpeg': 'video/mpeg',
+  '.3gp': 'video/3gpp'
+};
 
 /** Only forward things that are plausibly playable, not any stray argument. */
 function isPlayableFile(p) {
@@ -148,6 +179,14 @@ function registerProtocol() {
       return handleMedia(url, request);
     }
 
+    // Cached thumbnails. The renderer only ever holds an opaque cache key, so
+    // this cannot be used to read an arbitrary file: the key is validated
+    // against the character set the cache itself produces, and the path is
+    // rebuilt from the cache directory rather than taken from the request.
+    if (url.pathname === '/__thumb') {
+      return handleThumb(url);
+    }
+
     // vs://app/<relative renderer asset>
     const rel = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html';
     const target = path.normalize(path.join(RENDERER_DIR, rel));
@@ -167,17 +206,7 @@ async function handleMedia(url, request) {
   const kind = url.searchParams.get('src');
 
   if (kind === 'local') {
-    const filePath = url.searchParams.get('p');
-    if (!filePath || !path.isAbsolute(filePath) || !fs.existsSync(filePath)) {
-      return new Response('Not found', { status: 404 });
-    }
-    const headers = new Headers();
-    const range = request.headers.get('range');
-    if (range) headers.set('range', range);
-    return net.fetch(pathToFileURL(filePath).toString(), {
-      headers,
-      bypassCustomProtocolHandlers: true
-    });
+    return serveLocalFile(url.searchParams.get('p'), request);
   }
 
   if (kind === 'remote') {
@@ -213,9 +242,182 @@ async function handleMedia(url, request) {
   return new Response('Bad request', { status: 400 });
 }
 
+/**
+ * Parse one HTTP byte range against a known resource size.
+ *
+ * Only a single range is honoured, which is all Chromium's media stack ever
+ * asks for. `bytes=a-`, `bytes=a-b` and the suffix form `bytes=-n` are all
+ * real requests it makes. Returns null for a header we do not understand (the
+ * caller then serves the whole resource, which is the correct fallback) and
+ * `false` for a syntactically valid but unsatisfiable range, which must be a
+ * 416 rather than a silent full-body reply.
+ */
+function parseByteRange(header, size) {
+  if (!header) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!match) return null;
+
+  const [, rawStart, rawEnd] = match;
+  let start;
+  let end;
+
+  if (rawStart === '') {
+    // Suffix range: the last N bytes.
+    const suffix = Number(rawEnd);
+    if (!rawEnd || !Number.isFinite(suffix) || suffix <= 0) return false;
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(rawStart);
+    end = rawEnd === '' ? size - 1 : Number(rawEnd);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+    // A range that runs past the end is clamped, not refused: that is what the
+    // spec says and what every media client relies on.
+    end = Math.min(end, size - 1);
+  }
+
+  if (start > end || start >= size || start < 0) return false;
+  return { start, end };
+}
+
+/**
+ * Serve a local file to the media element, with real range support.
+ *
+ * This used to hand the path to `net.fetch` as a `file://` URL and forward the
+ * Range header. Electron answers those with the entire body and status 200 —
+ * no `Accept-Ranges`, no `Content-Range` — so Chromium's media stack concluded
+ * the resource was not seekable: `video.seekable` stayed empty, and assigning
+ * `currentTime` snapped straight back to wherever playback already was. Local
+ * files could be played but never scrubbed.
+ *
+ * Answering the range ourselves is what makes the element seekable. The body is
+ * an `fs` read stream over exactly the requested window, so nothing is buffered
+ * whole, nothing is copied, and a seek costs one open at an offset.
+ */
+async function serveLocalFile(filePath, request) {
+  if (!filePath || !path.isAbsolute(filePath)) {
+    return new Response('Not found', { status: 404 });
+  }
+
+  let stat;
+  try {
+    stat = await fs.promises.stat(filePath);
+  } catch {
+    return new Response('Not found', { status: 404 });
+  }
+  if (!stat.isFile()) return new Response('Not found', { status: 404 });
+
+  const size = stat.size;
+  const type = VIDEO_MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
+  const range = parseByteRange(request.headers.get('range'), size);
+
+  // Valid syntax, impossible window. Chromium recovers from this correctly;
+  // a 200 with the whole file here would desynchronise its demuxer.
+  if (range === false) {
+    return new Response(null, {
+      status: 416,
+      headers: { 'content-range': `bytes */${size}`, 'accept-ranges': 'bytes' }
+    });
+  }
+
+  const start = range ? range.start : 0;
+  const end = range ? range.end : size - 1;
+  const length = size === 0 ? 0 : end - start + 1;
+
+  const headers = new Headers({
+    'content-type': type,
+    'content-length': String(length),
+    // The header that actually decides whether the element reports a seekable
+    // range. Without it Chromium will not issue a range request at all.
+    'accept-ranges': 'bytes',
+    'cache-control': 'no-store'
+  });
+  if (range) headers.set('content-range', `bytes ${start}-${end}/${size}`);
+
+  // HEAD is answered with the headers alone; the media stack uses it to learn
+  // the length before it commits to a read.
+  if (request.method === 'HEAD' || length === 0) {
+    return new Response(null, { status: range ? 206 : 200, headers });
+  }
+
+  const stream = fs.createReadStream(filePath, { start, end });
+  // A seek cancels the in-flight read. Without this the abandoned stream stays
+  // open holding a file handle for every scrub.
+  const signal = request.signal;
+  if (signal) {
+    if (signal.aborted) stream.destroy();
+    else signal.addEventListener('abort', () => stream.destroy(), { once: true });
+  }
+  stream.on('error', (err) => {
+    if (err && err.code !== 'ERR_STREAM_PREMATURE_CLOSE') {
+      log.warn('local media read failed', { error: err.message });
+    }
+  });
+
+  return new Response(Readable.toWeb(stream), { status: range ? 206 : 200, headers });
+}
+
+/**
+ * Serve one cached thumbnail.
+ *
+ * Cache-Control matters here: these images are immutable for a given key (a
+ * new frame would be a new key), and without it Chromium re-reads every card's
+ * image on every re-render of the Queue.
+ */
+async function handleThumb(url) {
+  const key = url.searchParams.get('k');
+  if (!thumbnails || !key || !/^[a-z]_[0-9a-f]{8,40}$/.test(key)) {
+    return new Response('Not found', { status: 404 });
+  }
+  const file = thumbnails.fileFor(key);
+  if (!fs.existsSync(file)) return new Response('Not found', { status: 404 });
+  try {
+    const body = await fs.promises.readFile(file);
+    return new Response(body, {
+      status: 200,
+      headers: {
+        'content-type': 'image/jpeg',
+        'cache-control': 'public, max-age=31536000, immutable'
+      }
+    });
+  } catch {
+    return new Response('Not found', { status: 404 });
+  }
+}
+
 /* ------------------------------------------------------------------ *
  * Window
  * ------------------------------------------------------------------ */
+
+/**
+ * Integrated window chrome.
+ *
+ * The application bar *is* the title bar. On Windows and Linux that means
+ * `titleBarStyle: 'hidden'` plus a title-bar overlay: Chromium keeps drawing
+ * the real minimise / maximise / close buttons, so snapping, the system menu,
+ * Win+Arrow and the accessibility affordances all keep working. macOS gets
+ * `hiddenInset`, which leaves the native traffic lights in their expected
+ * place; the renderer insets the brand for them.
+ *
+ * Deliberately not a frameless window with buttons of our own: hand-drawn
+ * window controls lose snap layouts, double-click-to-maximise and every
+ * platform convention, and they are the first thing to break on a DPI change.
+ */
+const TITLE_BAR_HEIGHT = 48;
+
+function windowChrome() {
+  if (process.platform === 'darwin') {
+    return { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 14, y: 16 } };
+  }
+  return {
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#0D0F10',
+      symbolColor: '#A7ACB2',
+      height: TITLE_BAR_HEIGHT
+    }
+  };
+}
 
 function createWindow() {
   const saved = store.get('window');
@@ -226,10 +428,11 @@ function createWindow() {
     y: Number.isInteger(saved.y) ? saved.y : undefined,
     minWidth: 940,
     minHeight: 620,
-    backgroundColor: '#07070c',
+    backgroundColor: '#08090A',
     show: false,
     autoHideMenuBar: true,
     title: 'Visionance',
+    ...windowChrome(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -267,6 +470,14 @@ function createWindow() {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
+  // A reload destroys the document that owns the telemetry subscriptions
+  // without it ever releasing them. Clearing them here, before the new
+  // document runs, is what keeps "nothing samples while nobody is looking"
+  // true across View → Reload.
+  win.webContents.on('did-start-loading', () => {
+    if (telemetry) telemetry.reset();
+  });
+
   win.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith('vs://app/')) {
       event.preventDefault();
@@ -833,6 +1044,21 @@ function registerIpc() {
 
   /* ---------- AI engines ---------- */
 
+  /* ---------- semantic detection ---------- */
+
+  handle('semantic:status', () => ok({ semantic: semanticModels.status() }));
+
+  handle('semantic:install', async (event) => {
+    const status = await semanticModels.installModels((p) => {
+      event.sender.send('semantic:progress', p);
+    });
+    return ok({ semantic: status });
+  });
+
+  handle('semantic:cancelInstall', () => ok({ cancelled: semanticModels.cancelInstall() }));
+
+  handle('semantic:remove', () => ok({ semantic: semanticModels.remove() }));
+
   handle('engines:status', async (_e, opts = {}) =>
     ok({ engines: await engines.statusAll({ force: !!opts.force }) }));
 
@@ -896,7 +1122,11 @@ function registerIpc() {
       realesrgan: status.realesrgan && status.realesrgan.status === 'ready',
       rife: status.rife && status.rife.status === 'ready',
       // Smart Reframe needs no model; it needs ffmpeg, which Create needs anyway.
-      reframe: !!binPaths().ffmpeg
+      reframe: !!binPaths().ffmpeg,
+      // Whether the *semantic* layer above it can run. Auto uses this to
+      // choose tracking for talking-head profiles without ever promising
+      // face tracking on a machine that has none.
+      semanticReframe: semanticModels ? semanticModels.status().status === 'ready' : false
     };
     const result = autoRecipe.buildAutoRecipe({
       analysis: request.analysis,
@@ -1035,6 +1265,41 @@ function registerIpc() {
   });
 
   handle('media:localUrl', (_e, filePath) => ok({ url: localMediaUrl(filePath) }));
+
+  /* ---------- thumbnails ---------- */
+
+  /**
+   * One thumbnail per source identity, produced once and reused everywhere.
+   * The renderer sends a descriptor and gets back a `vs://` URL or `null`;
+   * it never learns where the cache lives.
+   */
+  handle('thumbs:get', async (_e, descriptor) => {
+    if (!thumbnails) return ok({ url: null, key: null });
+    const key = thumbnails.keyFor(descriptor);
+    if (!key) return ok({ url: null, key: null });
+    const result = await thumbnails.ensure(descriptor);
+    if (!result) return ok({ url: null, key, unavailable: true });
+    return ok({
+      url: `vs://app/__thumb?k=${encodeURIComponent(result.key)}`,
+      key: result.key,
+      cached: result.cached
+    });
+  });
+
+  handle('thumbs:stats', () => ok({ cache: thumbnails ? thumbnails.stats() : null }));
+
+  handle('thumbs:clear', () => ok({ removed: thumbnails ? thumbnails.clear() : 0 }));
+
+  /* ---------- telemetry ---------- */
+
+  /**
+   * Sampling runs only while the renderer says a panel is on screen. Nothing
+   * here is modelled: a metric this machine does not expose comes back null.
+   */
+  handle('telemetry:subscribe', (_e, active) =>
+    ok({ ...telemetry.setActive(active !== false) }));
+
+  handle('telemetry:sample', async () => ok({ sample: await telemetry.snapshot() }));
 }
 
 /**
@@ -1163,12 +1428,37 @@ if (!gotLock) {
       if (win && !win.isDestroyed()) win.webContents.send('engines:status', s);
     });
 
+    // The semantic models sit beside the engines but are managed separately:
+    // they are weights, not executables, and they must never gate a render.
+    semanticModels = new SemanticManager({
+      rootDir: process.env.VISIONANCE_ENGINES_DIR || path.join(userData, 'engines')
+    });
+    semanticModels.on('status', (s) => {
+      if (win && !win.isDestroyed()) win.webContents.send('semantic:status', s);
+    });
+
+    // One thumbnail per source, cached outside the app folder so a reinstall
+    // does not throw the cache away and a repo checkout never carries images.
+    thumbnails = new Thumbnails({
+      dir: path.join(userData, 'cache', 'thumbnails'),
+      binPaths,
+      net
+    });
+
+    telemetry = new Telemetry({
+      app,
+      onSample: (sample) => {
+        if (win && !win.isDestroyed()) win.webContents.send('telemetry:sample', sample);
+      }
+    });
+
     jobs = new JobManager({
       dir: path.join(userData, 'jobs'),
       workDir: path.join(userData, 'work'),
       resolveBins: binPaths,
       resolveRemote: resolveRemoteForJob,
       engines,
+      semantic: semanticModels,
       logger
     });
     jobs.on('update', (job) => {
@@ -1215,6 +1505,7 @@ if (!gotLock) {
       try { powerSaveBlocker.stop(sleepBlockerId); } catch { /* ignore */ }
       sleepBlockerId = null;
     }
+    if (telemetry) telemetry.dispose();
     if (!jobs || quitting) return;
     // Give the job system a moment to tear ffmpeg down and write honest final
     // states, rather than leaving jobs claiming to be mid-render.

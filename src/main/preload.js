@@ -42,6 +42,24 @@ contextBridge.exposeInMainWorld('visionance', {
     localUrl: (filePath) => invoke('media:localUrl', filePath)
   },
 
+  /**
+   * One stable thumbnail per source identity. The renderer sends a descriptor
+   * and receives a `vs://` URL or null; it never sees the cache directory and
+   * cannot ask for an arbitrary file.
+   */
+  thumbnails: {
+    get: (descriptor) => invoke('thumbs:get', descriptor),
+    stats: () => invoke('thumbs:stats'),
+    clear: () => invoke('thumbs:clear')
+  },
+
+  /** Measured machine metrics. Sampling only runs while a panel subscribes. */
+  telemetry: {
+    subscribe: (active) => invoke('telemetry:subscribe', active),
+    sample: () => invoke('telemetry:sample'),
+    onSample: (cb) => on('telemetry:sample', cb)
+  },
+
   recipe: {
     platforms: () => invoke('recipe:platforms'),
     aspects: () => invoke('recipe:aspects'),
@@ -91,6 +109,15 @@ contextBridge.exposeInMainWorld('visionance', {
     remove: (id) => invoke('engines:remove', id),
     onProgress: (cb) => on('engines:progress', cb),
     onStatus: (cb) => on('engines:status', cb)
+  },
+
+  semantic: {
+    status: () => invoke('semantic:status'),
+    install: () => invoke('semantic:install'),
+    cancelInstall: () => invoke('semantic:cancelInstall'),
+    remove: () => invoke('semantic:remove'),
+    onProgress: (cb) => on('semantic:progress', cb),
+    onStatus: (cb) => on('semantic:status', cb)
   },
 
   runtime: {

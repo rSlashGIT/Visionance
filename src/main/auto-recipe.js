@@ -338,9 +338,32 @@ function buildAutoRecipe({
     if (sourceIsWider && engines.reframe) {
       framing.mode = 'fill';
       framing.tracking = 'auto';
-      explanations.push(
-        `${platformDef.label}: Smart Reframe enabled so the subject stays in the ${platformDef.canvas} crop.`
-      );
+      // Say which backend will actually run. Promising face tracking on a
+      // machine with no models installed is the kind of small lie the
+      // telemetry work exists to prevent.
+      const semanticProfiles = ['film', 'dialogue', 'action', 'auto', 'lowlight'];
+      const semanticWanted = engines.semanticReframe && semanticProfiles.includes(profile);
+      if (semanticWanted) {
+        explanations.push(
+          `${platformDef.label}: Smart Reframe enabled with face and person tracking, ` +
+          'so a subject who is standing still is not lost to a busy background.'
+        );
+      } else if (engines.semanticReframe && profile === 'gaming') {
+        // A webcam face is not the subject of a gameplay clip.
+        explanations.push(
+          `${platformDef.label}: Smart Reframe enabled following the game action; ` +
+          'face tracking is available but is not assumed to be the subject here.'
+        );
+      } else {
+        explanations.push(
+          `${platformDef.label}: Smart Reframe enabled so the subject stays in the ${platformDef.canvas} crop.`
+        );
+        if (!engines.semanticReframe) {
+          explanations.push(
+            'Face and person detection is not installed, so tracking follows motion and detail.'
+          );
+        }
+      }
     } else if (sourceIsWider) {
       framing.mode = 'fit';
       framing.tracking = 'center';

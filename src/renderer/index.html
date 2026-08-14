@@ -3,96 +3,182 @@
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'self' vs:; img-src 'self' vs: data: blob: https:; media-src 'self' vs: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' vs:;">
+      content="default-src 'self' vs:; img-src 'self' vs: data: blob:; media-src 'self' vs: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' vs:;">
 <title>Visionance</title>
 <link rel="stylesheet" href="styles.css">
 </head>
-<body>
+<!-- The opening workspace. `setWorkspace()` is the authority and rewrites this
+     during boot; the attribute is here so the first paint is not unstyled. -->
+<body data-workspace="create">
 
 <div class="app" id="app">
 
-  <!-- ───────────────────────── Top bar ───────────────────────── -->
-  <header class="topbar">
+  <!-- ═══════════════════════════ Application shell ═══════════════════════
+       The window's own title region. `titleBarStyle: 'hidden'` plus a title
+       bar overlay means the minimise / maximise / close buttons are the real
+       native ones, drawn by the OS at the right of this bar; everything here
+       is a drag region except the controls, which opt out. -->
+  <header class="topbar" id="topbar">
     <div class="brand">
-      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-        <defs>
-          <linearGradient id="bg1" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stop-color="#4be1f5"/>
-            <stop offset="100%" stop-color="#8b6cf6"/>
-          </linearGradient>
-        </defs>
-        <path d="M4 6h24v20H4z" fill="none" stroke="url(#bg1)" stroke-width="2" rx="3"/>
-        <path d="M12 11l9 5-9 5z" fill="url(#bg1)"/>
+      <!-- V, frame and aperture in one mark. Static: an idle window should
+           cost nothing, and a logo that animates is a logo you stop reading. -->
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="1.75" y="3.75" width="20.5" height="16.5" rx="2.25"
+              fill="none" stroke="#FF4B32" stroke-width="1.5"/>
+        <path d="M8 8.5l4 7 4-7" fill="none" stroke="#F3F4F5" stroke-width="1.6"
+              stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
-      <div class="brand-text">
-        <strong>Visionance</strong>
-        <span id="brandSub">Real-time enhancement</span>
-      </div>
+      <strong class="brand-word">Visionance</strong>
+      <!-- What is loaded, in the place a post application puts the project
+           name. It is the real descriptor title, never a codename. -->
+      <span class="brand-project" id="brandSub">No source</span>
     </div>
 
-    <div class="omnibar">
-      <input id="urlInput" type="text" spellcheck="false"
-             placeholder="Paste a video URL, or drop a file anywhere…"
-             aria-label="Video URL">
-      <button id="goBtn" class="btn btn-accent" title="Resolve and play (Enter)">Play</button>
-      <button id="openFileBtn" class="btn btn-ghost" title="Open a local file (Ctrl+O)">Open file</button>
-    </div>
+    <!--
+      Four workspaces, Create first.
+
+      Create is where a session starts, so it is both the opening workspace and
+      the leftmost tab. Adjust is gone as a destination: its parameters were
+      never a separate job, they were the realtime look, so they live in Watch
+      as Fine Tune. `presets` remains Watch's internal id — renaming it would
+      touch the engine, the settings store and every stylesheet rule for no
+      user-visible gain.
+    -->
+    <nav class="tabs" role="tablist" aria-label="Workspace">
+      <button class="tab active" data-tab="create" role="tab" aria-selected="true">Create</button>
+      <button class="tab" data-tab="presets" role="tab" aria-selected="false">Watch</button>
+      <button class="tab" data-tab="queue" role="tab" aria-selected="false">Queue<span class="tab-count" id="queueCount" hidden>0</span></button>
+      <button class="tab" data-tab="library" role="tab" aria-selected="false">Library</button>
+    </nav>
 
     <div class="topbar-right">
-      <button id="statsBtn" class="icon-btn" title="Statistics overlay (Ctrl+I)">◔</button>
-      <button id="settingsBtn" class="icon-btn" title="Settings">⚙</button>
+      <!-- Active render, wherever you are in the app. Click to open the Queue. -->
+      <button class="job-strip" id="jobStrip" hidden title="Open the render queue"></button>
+      <button id="openFileBtn" class="icon-btn" title="Open a local file (Ctrl+O)"
+              aria-label="Open a local file"></button>
+      <button id="statsBtn" class="icon-btn" title="Playback diagnostics (Ctrl+I)"
+              aria-label="Playback diagnostics" aria-pressed="false"></button>
+      <button id="settingsBtn" class="icon-btn" title="Settings" aria-label="Settings"></button>
     </div>
   </header>
 
-  <!-- ───────────────────────── Main ───────────────────────── -->
+  <!-- ═══════════════════════════ Main ════════════════════════════════════ -->
   <main class="main">
+
+    <!-- ─────────────── Source / project column ─────────────────────────────
+         Create's, and only Create's. Watch used to have a mirror of this on
+         the Adjust workspace; with Adjust merged into Watch the player's own
+         source facts live in Watch's inspector instead, where they sit beside
+         the controls that act on them rather than across the window from them.
+
+         Everything here is read from the descriptor and the analysis that
+         already exist. Nothing is invented: a field the probe did not report
+         is left out rather than filled with a plausible value. -->
+    <aside class="source-column" id="sourceColumn" hidden aria-label="Create source">
+      <!-- Create: its own source, deliberately not Watch's. The controls live
+           here rather than in the inspector so the workspace reads the way the
+           work does — context on the left, the thing being made on the right. -->
+      <div class="col-scope" data-scope="create">
+        <section class="col-module" id="createSource">
+          <div class="col-head">
+            <h3>Create source</h3>
+            <span class="col-tag" id="createKindTag"></span>
+          </div>
+          <div class="col-ident">
+            <div class="thumb poster" id="createThumb"></div>
+            <div class="col-ident-text">
+              <strong id="createSourceTitle">No source selected</strong>
+              <span id="createSourceSub">Choose a video, paste a URL, or use whatever Watch is playing.</span>
+            </div>
+          </div>
+
+          <div class="create-source-actions">
+            <button class="btn btn-ghost" id="createOpenFileBtn">Choose video</button>
+            <button class="btn btn-ghost" id="createUseWatchBtn">Use Watch video</button>
+          </div>
+          <div class="create-source-url">
+            <input id="createUrlInput" class="input" type="text" spellcheck="false"
+                   placeholder="…or paste a video URL" aria-label="Create source URL">
+            <button class="btn btn-ghost" id="createUrlBtn">Load</button>
+          </div>
+        </section>
+
+        <section class="col-module">
+          <div class="col-head">
+            <h3>Source analysis</h3>
+            <button class="link-btn" id="analyseBtn">Analyse</button>
+          </div>
+          <div class="analysis-grid" id="analysisGrid"></div>
+          <p class="field-help last col-note" id="analysisNote"></p>
+        </section>
+
+        <!-- The intake half of the command centre: the same recents the
+             Library shows, aimed at Create rather than at the player. Picking
+             one here sets the *Create* source and leaves Watch alone, which is
+             the whole point of the two being separate. -->
+        <section class="col-module">
+          <div class="col-head">
+            <h3>Recent sources</h3>
+            <span class="col-tag" id="createRecentsTag"></span>
+          </div>
+          <div class="mini-recents" id="createRecents"></div>
+        </section>
+      </div>
+    </aside>
 
     <section class="stage" id="stage">
       <div class="stage-inner" id="stageInner">
         <canvas id="glCanvas" class="hidden"></canvas>
 
-        <!-- Hidden media elements: the canvas is what the user sees.
-             preload="auto" matters for the separate audio track of a split
-             stream: with the default, a paused audio element fetches metadata
-             and then suspends the network, so if it ever fails to start it
-             never loads the rest and the video plays silently. -->
+        <!-- The media elements. Which of them is *the picture* is decided by
+             .stage-inner.native in the stylesheet, and by applyPresentationMode()
+             in app.js. preload="auto" matters for the separate audio track of a
+             split stream: with the default, a paused audio element fetches
+             metadata and then suspends the network, so a track that fails to
+             start never loads and the video plays silently. -->
         <video id="video" playsinline preload="auto"></video>
         <audio id="audio" preload="auto"></audio>
 
         <div class="stage-empty" id="stageEmpty">
-          <div class="empty-art">
-            <div class="empty-ring"></div>
-            <div class="empty-ring d2"></div>
-            <span>▶</span>
+          <div class="empty-art" aria-hidden="true">
+            <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.4">
+              <rect x="4" y="9" width="40" height="30" rx="3"/>
+              <circle cx="24" cy="24" r="8.5"/>
+              <path d="M24 15.5v17M15.5 24h17" stroke-width="1"/>
+            </svg>
           </div>
-          <h2>Drop a video here</h2>
-          <p>Or paste a link above. Visionance upscales and cleans it up live on your GPU — nothing is downloaded, nothing is re-encoded.</p>
+          <h2>Open a video</h2>
+          <p>Drop a file here, or paste a link into the source bar in Watch.
+             Visionance upscales and cleans it up live on your GPU — nothing is
+             downloaded, nothing is re-encoded.</p>
           <div class="empty-actions">
             <button class="btn btn-accent" id="emptyOpenBtn">Open a file</button>
-            <button class="btn btn-ghost" id="emptyDemoBtn">What does it do?</button>
+            <button class="btn btn-ghost" id="emptyDemoBtn">How it works</button>
           </div>
         </div>
 
         <div class="stage-loading" id="stageLoading" hidden>
           <div class="spinner"></div>
-          <p id="loadingText">Resolving stream…</p>
+          <p id="loadingText">Resolving source…</p>
         </div>
 
         <div class="stats-overlay" id="statsOverlay" hidden></div>
 
         <div class="compare-labels" id="compareLabels" hidden>
-          <span class="lbl left">Original</span>
-          <span class="lbl right">Enhanced</span>
+          <span class="lbl left">Before</span>
+          <span class="lbl right">After</span>
         </div>
 
-        <div class="split-handle" id="splitHandle" hidden></div>
+        <div class="split-handle" id="splitHandle" hidden role="separator"
+             aria-label="Compare divider" tabindex="0"></div>
 
-        <div class="toast-stack" id="toastStack"></div>
+        <div class="toast-stack" id="toastStack" role="status" aria-live="polite"></div>
       </div>
 
-      <!-- Transport -->
+      <!-- ───────────────────── Transport ───────────────────── -->
       <div class="transport" id="transport">
-        <div class="scrub" id="scrub">
+        <div class="scrub" id="scrub" role="slider" tabindex="0"
+             aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
           <div class="scrub-track">
             <div class="scrub-buffered" id="scrubBuffered"></div>
             <div class="scrub-played" id="scrubPlayed"></div>
@@ -103,371 +189,651 @@
 
         <div class="transport-row">
           <div class="tgroup">
-            <button class="icon-btn lg" id="playBtn" title="Play / Pause (Space)">▶</button>
-            <button class="icon-btn" id="back10Btn" title="Back 10s (←)">⟲</button>
-            <button class="icon-btn" id="fwd10Btn" title="Forward 10s (→)">⟳</button>
+            <button class="icon-btn lg" id="playBtn" title="Play / Pause (Space)" aria-label="Play"></button>
+            <button class="icon-btn" id="back10Btn" title="Back 10 seconds (J)" aria-label="Back 10 seconds"></button>
+            <button class="icon-btn" id="fwd10Btn" title="Forward 10 seconds (L)" aria-label="Forward 10 seconds"></button>
             <div class="volume">
-              <button class="icon-btn" id="muteBtn" title="Mute (M)">🔊</button>
+              <button class="icon-btn" id="muteBtn" title="Mute (M)" aria-label="Mute"></button>
               <input type="range" id="volume" min="0" max="1" step="0.01" value="1" aria-label="Volume">
             </div>
             <span class="time" id="timeLabel">0:00 / 0:00</span>
           </div>
 
           <div class="tgroup center">
-            <button class="pill" id="enhanceToggle" title="Toggle enhancement (Ctrl+B)">
+            <button class="pill" id="enhanceToggle" title="Toggle enhancement (B)" aria-pressed="true">
               <span class="dot"></span> Enhancement on
             </button>
-            <button class="pill ghost" id="compareBtn" title="Split compare (Ctrl+D)">Compare</button>
-            <button class="pill ghost" id="sendToCreateBtn" title="Create from this video (Ctrl+E)">Create from this</button>
+            <button class="pill ghost" id="compareBtn" title="Split compare (C)" aria-pressed="false">Compare</button>
             <span class="res-badge" id="resBadge">—</span>
           </div>
 
           <div class="tgroup right">
-            <select id="speedSelect" class="mini-select" title="Playback speed">
+            <button class="pill ghost" id="sendToCreateBtn" title="Set this as the Create source (Ctrl+E)">Create from this</button>
+            <button class="icon-btn" id="snapshotBtn" title="Save the enhanced frame (S)" aria-label="Save frame"></button>
+            <button class="icon-btn" id="playerSettingsBtn" title="Player settings"
+                    aria-label="Player settings" aria-haspopup="true" aria-expanded="false"></button>
+            <button class="icon-btn" id="pipBtn" title="Picture in picture" aria-label="Picture in picture"></button>
+            <button class="icon-btn" id="fullscreenBtn" title="Fullscreen (F)" aria-label="Fullscreen"></button>
+          </div>
+        </div>
+
+        <!-- Player settings. The controls in here are the real ones, not
+             mirrors of controls kept elsewhere, so there is one source of
+             truth for playback rate and looping. -->
+        <div class="popover player-popover" id="playerPopover" hidden role="menu" aria-label="Player settings">
+          <div class="popover-title">Playback</div>
+          <div class="popover-row" role="none">
+            <label for="speedSelect">Speed</label>
+            <select id="speedSelect" class="select sm" aria-label="Playback speed">
               <option value="0.25">0.25×</option>
               <option value="0.5">0.5×</option>
               <option value="0.75">0.75×</option>
-              <option value="1" selected>1×</option>
+              <option value="1" selected>Normal</option>
               <option value="1.25">1.25×</option>
               <option value="1.5">1.5×</option>
               <option value="2">2×</option>
             </select>
-            <button class="icon-btn" id="snapshotBtn" title="Save enhanced frame (S)">⛶</button>
-            <button class="icon-btn" id="pipBtn" title="Picture in picture">⧉</button>
-            <button class="icon-btn" id="fullscreenBtn" title="Fullscreen (F)">⛶</button>
           </div>
+          <div class="popover-row" role="none">
+            <label for="loopToggle">Loop</label>
+            <input type="checkbox" id="loopToggle" class="switch">
+          </div>
+          <div class="popover-sep"></div>
+          <div class="popover-title">Stream</div>
+          <div class="popover-row" role="none">
+            <span>Quality</span>
+            <span class="pv" id="popoverQuality">—</span>
+          </div>
+          <div class="popover-row" role="none">
+            <span>Decoded</span>
+            <span class="pv" id="popoverSource">—</span>
+          </div>
+          <div class="popover-sep"></div>
+          <button class="popover-row" id="popoverStats" role="menuitem">
+            <span>Diagnostics overlay</span>
+            <span class="pv" id="popoverStatsState">Off</span>
+          </button>
+          <button class="popover-row" id="popoverInfo" role="menuitem">
+            <span>How enhancement works</span>
+          </button>
         </div>
+      </div>
+
+      <!-- ───────────── Source / process strip ─────────────────────────────
+           A dense read of what is loaded and what is being done to it, sitting
+           directly under the picture. Every value is a readout of live state;
+           a field with nothing behind it says so. -->
+      <div class="process-strip" id="processStrip" hidden>
+        <div class="ps-cell ps-source">
+          <div class="ps-head"><h4>Source</h4><span class="ps-tag" id="utilitySourceTag"></span></div>
+          <div class="ps-body" id="utilitySource"><p class="ps-empty">Nothing loaded.</p></div>
+        </div>
+        <div class="ps-cell">
+          <div class="ps-head"><h4>Look</h4><span class="ps-tag" id="psLookTag"></span></div>
+          <div class="ps-body" id="psLook"><p class="ps-empty">—</p></div>
+        </div>
+        <div class="ps-cell">
+          <div class="ps-head"><h4>Enhancement</h4><span class="ps-tag" id="psEnhanceTag"></span></div>
+          <div class="ps-body" id="psEnhance"><p class="ps-empty">—</p></div>
+        </div>
+        <div class="ps-cell ps-last">
+          <div class="ps-head"><h4>Realtime engine</h4><span class="ps-tag" id="psEngineTag"></span></div>
+          <div class="ps-body" id="psEngine"><p class="ps-empty">—</p></div>
+        </div>
+      </div>
+
+      <!-- ───────────── Operations console ─────────────────────────────────
+           What is rendering, what this machine is doing, and what is installed
+           to do it with. Written only while it is on screen, and only on real
+           events — a job update or a telemetry sample. -->
+      <div class="utility-strip" id="utilityStrip" hidden>
+        <section class="bay bay-jobs">
+          <div class="bay-head">
+            <div class="bay-tabs" id="consoleTabs" role="tablist" aria-label="Render operations">
+              <button class="bay-tab active" data-console="queue" role="tab" aria-selected="true">Queue</button>
+              <button class="bay-tab" data-console="jobs" role="tab" aria-selected="false">Jobs</button>
+              <button class="bay-tab" data-console="history" role="tab" aria-selected="false">History</button>
+            </div>
+            <span class="bay-tag" id="utilityQueueTag"></span>
+          </div>
+          <div class="bay-body scrolls" id="utilityQueue"></div>
+        </section>
+
+        <section class="bay bay-perf">
+          <div class="bay-head">
+            <h4>System performance</h4>
+            <span class="bay-tag" id="utilityPerfTag"></span>
+          </div>
+          <div class="bay-body">
+            <div class="telemetry" id="utilityTelemetry"></div>
+          </div>
+        </section>
+
+        <section class="bay bay-engines">
+          <div class="bay-head">
+            <h4>Engines &amp; storage</h4>
+            <span class="bay-tag" id="consoleEngineTag"></span>
+          </div>
+          <div class="bay-body scrolls" id="consoleEngines"></div>
+        </section>
       </div>
     </section>
 
-    <!-- ───────────────────────── Side panel ───────────────────────── -->
+    <!-- ═════════════════════════ Inspector ═══════════════════════════════ -->
     <aside class="panel" id="panel">
-      <nav class="tabs" role="tablist">
-        <button class="tab active" data-tab="presets">Watch</button>
-        <button class="tab" data-tab="adjust">Adjust</button>
-        <button class="tab" data-tab="create">Create</button>
-        <button class="tab" data-tab="queue">Queue</button>
-        <button class="tab" data-tab="library">Library</button>
-      </nav>
-
       <div class="tab-body">
 
-        <!-- Presets -->
-        <section class="tab-page active" data-page="presets">
-          <div class="preset-grid" id="presetGrid"></div>
-
-          <div class="field-row">
-            <label for="watchQuality">Playback quality</label>
-            <select id="watchQuality" class="select">
-              <option value="auto" selected>Auto</option>
-              <option value="performance">Performance</option>
-              <option value="balanced">Balanced</option>
-              <option value="quality">Quality</option>
-              <option value="maximum">Maximum</option>
-            </select>
-          </div>
-          <p class="field-help">How hard realtime enhancement is allowed to work. Auto keeps motion smooth and raises quality only when there is headroom. This never affects Create's offline AI quality.</p>
-
-          <div class="field-row">
-            <label for="scaleSelect">Render resolution</label>
-            <select id="scaleSelect" class="select">
-              <option value="auto">Auto (match display)</option>
-              <option value="1">1× source</option>
-              <option value="1.5">1.5×</option>
-              <option value="2">2×</option>
-              <option value="3">3×</option>
-              <option value="4">4×</option>
-            </select>
-          </div>
-          <p class="field-help">Auto renders exactly enough pixels for your screen. Higher values look sharper only if your display can show them.</p>
-
-          <div class="field-row switch-row">
-            <label for="adaptiveToggle">Adaptive quality</label>
-            <input type="checkbox" id="adaptiveToggle" class="switch" checked>
-          </div>
-          <p class="field-help">Automatically lowers the render resolution if your GPU can't keep up, instead of stuttering.</p>
-
-          <div class="save-preset">
-            <input type="text" id="presetName" placeholder="Name this look…" maxlength="40">
-            <button class="btn btn-ghost" id="savePresetBtn">Save preset</button>
-          </div>
-        </section>
-
-        <!-- Adjust -->
-        <section class="tab-page" data-page="adjust">
-          <div id="controlGroups"></div>
-          <button class="btn btn-ghost full" id="resetParamsBtn">Reset to preset</button>
-        </section>
-
-        <!-- Create -->
-        <section class="tab-page" data-page="create">
-          <div class="export-intro">
-            <h3>Finish a file for upload</h3>
-            <p>Renders a new file with ffmpeg: repair, rescale, reframe, grade, audio, encode. This is a different engine from the live preview, so the result is based on your look rather than pixel-identical to it.</p>
-          </div>
-
-          <div class="create-source" id="createSource">
-            <div class="create-source-head">
-              <strong id="createSourceTitle">No source selected</strong>
-              <button class="link-btn" id="analyseBtn">Analyse</button>
+        <!-- ───────────── WATCH ───────────── -->
+        <section class="tab-page" data-page="presets" role="tabpanel" aria-label="Watch">
+          <!-- SOURCE. Open File and the URL bar belong to Watch, which is the
+               workspace that owns the player, rather than to a global bar that
+               makes the whole application read like a browser. -->
+          <div class="module">
+            <div class="module-head">
+              <h3>Source</h3>
+              <span class="module-tag" id="watchSourceTag"></span>
             </div>
+            <div class="module-body">
+              <div class="source-bar">
+                <input id="urlInput" type="text" spellcheck="false"
+                       placeholder="Paste a video URL"
+                       aria-label="Video URL">
+                <button id="goBtn" class="btn btn-accent" title="Resolve and play (Enter)">Play</button>
+              </div>
+              <p class="field-help">Or drop a file anywhere in the window, or press
+                <b>Ctrl+O</b> to open one.</p>
 
-            <!-- Create picks its own source. Watch keeps playing whatever it
-                 was playing; the two never fight over one video element. -->
-            <div class="create-source-actions">
-              <button class="btn btn-ghost" id="createOpenFileBtn">Choose video…</button>
-              <button class="btn btn-ghost" id="createUseWatchBtn">Use current Watch video</button>
-            </div>
-            <div class="create-source-url">
-              <input id="createUrlInput" type="text" spellcheck="false"
-                     placeholder="…or paste a video URL" aria-label="Create source URL">
-              <button class="btn btn-ghost" id="createUrlBtn">Load</button>
-            </div>
+              <div class="source-card" id="watchSource">
+                <div class="thumb md" id="watchThumb"></div>
+                <div class="source-card-body">
+                  <strong id="watchTitle">Nothing loaded</strong>
+                  <div class="source-card-meta" id="watchMeta">Open a file or paste a link to begin.</div>
+                  <div class="source-card-state" id="watchState" hidden></div>
+                </div>
+              </div>
 
-            <div class="analysis-grid" id="analysisGrid"></div>
-            <p class="field-help" id="analysisNote"></p>
-          </div>
-
-          <div class="auto-block" id="autoBlock">
-            <div class="ai-head">
-              <strong>Auto</strong>
-              <span class="ai-state" id="autoState">Analyse a source first</span>
-            </div>
-            <div class="field-row">
-              <label for="autoProfile">Content</label>
-              <select id="autoProfile" class="select"></select>
-            </div>
-            <div class="field-row">
-              <label for="autoIntensity">Intensity</label>
-              <select id="autoIntensity" class="select">
-                <option value="light">Light</option>
-                <option value="balanced" selected>Balanced</option>
-                <option value="strong">Strong</option>
-                <option value="maximum">Maximum</option>
-              </select>
-            </div>
-            <button class="btn btn-accent full" id="autoBuildBtn">Suggest settings</button>
-            <div class="auto-explain" id="autoExplain" hidden></div>
-          </div>
-
-          <div class="field-row">
-            <label for="createPreset">Export preset</label>
-            <select id="createPreset" class="select"><option value="">Custom…</option></select>
-          </div>
-
-          <div class="field-row">
-            <label for="createPlatform">Target</label>
-            <select id="createPlatform" class="select"></select>
-          </div>
-
-          <!-- Target suggests geometry; aspect ratio and resolution set it.
-               Three separate questions, three separate controls. -->
-          <div class="field-row">
-            <label for="createAspect">Aspect ratio</label>
-            <select id="createAspect" class="select"></select>
-          </div>
-          <div class="field-row" id="createAspectCustomRow" hidden>
-            <label for="createAspectW">Ratio</label>
-            <div class="dim-pair">
-              <input id="createAspectW" class="input" type="number" min="1" max="1000" value="16" aria-label="Aspect width">
-              <span>:</span>
-              <input id="createAspectH" class="input" type="number" min="1" max="1000" value="9" aria-label="Aspect height">
+              <!-- The full probe report, one disclosure away. This is the table
+                   the Adjust source column used to hold; it belongs to the
+                   source card rather than to a column of its own. -->
+              <details class="sub-details" id="sourceDetails">
+                <summary>Technical details</summary>
+                <div class="spec-list" id="sourceSpecs"></div>
+              </details>
             </div>
           </div>
 
-          <div class="field-row">
-            <label for="createRes">Output resolution</label>
-            <select id="createRes" class="select">
-              <option value="auto">Suggested for this ratio</option>
-              <option value="source">Same as source</option>
-              <option value="1280x720">1280 × 720</option>
-              <option value="1920x1080">1920 × 1080</option>
-              <option value="2560x1440">2560 × 1440</option>
-              <option value="3840x2160">3840 × 2160 (4K)</option>
-              <option value="custom">Custom…</option>
-            </select>
-          </div>
-          <div class="field-row" id="createResCustomRow" hidden>
-            <label for="createResW">Dimensions</label>
-            <div class="dim-pair">
-              <input id="createResW" class="input" type="number" min="16" max="16384" step="2" value="1920" aria-label="Output width">
-              <span>×</span>
-              <input id="createResH" class="input" type="number" min="16" max="16384" step="2" value="1080" aria-label="Output height">
+          <div class="module">
+            <div class="module-head">
+              <h3>Looks</h3>
+              <span class="ai-state" id="lookState" hidden>Custom</span>
+            </div>
+            <div class="module-body">
+              <div class="preset-grid" id="presetGrid"></div>
             </div>
           </div>
-          <p class="field-help" id="createGeometryNote"></p>
 
-          <div class="field-row" id="createFramingRow">
-            <label for="createFraming">Reframing</label>
-            <select id="createFraming" class="select">
-              <option value="smart">Smart Reframe (follow the subject)</option>
-              <option value="fill">Centre crop to fill</option>
-              <option value="fit">Fit, blurred background</option>
-              <option value="fit-black">Fit, black bars</option>
-            </select>
-          </div>
-          <p class="field-help" id="createFramingHelp">Smart Reframe tracks motion and visual saliency to keep the important action inside a taller crop. It is not face detection: it follows the moving, in-focus subject, and holds the last good position when it cannot find one. A clip with nothing trackable stays centred and the job says so.</p>
+          <!-- ───────────── FINE TUNE (formerly the Adjust workspace) ────────
+               The same shader parameters, the same modules, the same reset —
+               moved here because they were never a separate task. Choosing a
+               Look is the easy path; this is the same Look, opened up.
 
-          <div class="ai-block" id="aiBlock">
-            <div class="ai-head">
-              <strong>AI enhancement</strong>
-              <span class="ai-state" id="aiEngineState">Checking…</span>
+               Collapsed by default on purpose: fourteen sliders expanded is
+               what made Adjust feel like a workspace you had to learn, and the
+               point of the merge is that you no longer do. -->
+          <details class="group finetune" id="groupFineTune">
+            <summary>Fine tune <span class="gtag" id="fineTuneTag"></span></summary>
+            <div class="group-body">
+              <div class="ctx-rows">
+                <div class="ctx-row"><span>Enhancement</span><b id="adjustEnhanceState">—</b></div>
+                <div class="ctx-row"><span>Render</span><b id="adjustRenderTag">—</b></div>
+              </div>
+              <div class="section-head tight">
+                <h3>Parameters</h3>
+                <button class="link-btn" id="resetParamsBtn">Reset to preset</button>
+              </div>
+              <div id="controlGroups"></div>
             </div>
-
-            <div class="field-row">
-              <label for="createAi">Neural enhancement</label>
-              <select id="createAi" class="select">
-                <option value="off" selected>Off</option>
-                <option value="restore">Restore (same size)</option>
-                <option value="2">Upscale 2×</option>
-                <option value="4">Upscale 4×</option>
-              </select>
-            </div>
-
-            <div class="field-row" id="createAiQualityRow" hidden>
-              <label for="createAiQuality">Inference quality</label>
-              <select id="createAiQuality" class="select">
-                <option value="fast">Fast — cheapest path that reaches the scale</option>
-                <option value="balanced" selected>Balanced — recommended</option>
-                <option value="quality">Quality — full-size inference</option>
-                <option value="maximum">Maximum — largest scale, slowest</option>
-              </select>
-            </div>
-            <p class="field-help" id="createAiQualityNote" hidden></p>
-
-            <div class="field-row" id="createAiModelRow" hidden>
-              <label for="createAiModel">Model</label>
-              <select id="createAiModel" class="select">
-                <option value="auto">Auto</option>
-                <option value="general">General</option>
-                <option value="animation">Animation</option>
-              </select>
-            </div>
-            <p class="field-help" id="createAiNote" hidden></p>
-
-            <div class="field-row">
-              <label for="createInterp">Interpolation</label>
-              <select id="createInterp" class="select">
-                <option value="off" selected>Off</option>
-                <option value="classical">Classical (duplicate frames)</option>
-                <option value="ai">AI (RIFE)</option>
-              </select>
-            </div>
-
-            <div class="field-row switch-row" id="createSceneRow" hidden>
-              <label for="createScene">Scene-cut protection</label>
-              <input type="checkbox" id="createScene" class="switch" checked>
-            </div>
-            <p class="field-help" id="createSceneHelp" hidden>Detects hard cuts and interpolates each shot separately, so two different shots are never blended into one another.</p>
-
-            <button class="btn btn-accent full" id="installEnginesBtn" hidden>Install AI engines</button>
-            <div class="engine-progress" id="engineProgress" hidden></div>
-          </div>
-
-          <div class="field-row">
-            <label for="createFps">Frame rate</label>
-            <select id="createFps" class="select">
-              <option value="source">Same as source</option>
-              <option value="24">24 fps</option>
-              <option value="25">25 fps</option>
-              <option value="30">30 fps</option>
-              <option value="48">48 fps</option>
-              <option value="50">50 fps</option>
-              <option value="60">60 fps</option>
-              <option value="120">120 fps</option>
-            </select>
-          </div>
-          <p class="field-help" id="createFpsHelp">Frames are duplicated or dropped to hit the target. Choose AI interpolation above to generate genuinely new intermediate frames.</p>
-
-          <details class="advanced">
-            <summary>Advanced</summary>
-            <div class="field-row">
-              <label for="createGpu">GPU</label>
-              <select id="createGpu" class="select">
-                <option value="auto">Auto</option>
-              </select>
-            </div>
-            <div class="field-row">
-              <label for="createTile">Tile size</label>
-              <select id="createTile" class="select">
-                <option value="">Auto (shrinks on out-of-memory)</option>
-                <option value="512">512</option>
-                <option value="256">256</option>
-                <option value="128">128</option>
-                <option value="64">64</option>
-              </select>
-            </div>
-            <div class="field-row">
-              <label for="createSceneThreshold">Scene-cut sensitivity <span class="val" id="createSceneThresholdVal">0.35</span></label>
-              <input type="range" id="createSceneThreshold" min="0.05" max="0.9" step="0.05" value="0.35">
-            </div>
-            <p class="field-help" id="createModelDetail">—</p>
           </details>
 
-          <div class="field-row">
-            <label for="createEncoder">Encoder</label>
-            <select id="createEncoder" class="select">
-              <option value="auto">Automatic (prefer hardware)</option>
-            </select>
+          <div class="module">
+            <div class="module-head">
+              <h3>Realtime engine</h3>
+            </div>
+            <p class="module-purpose">How hard enhancement may work while the picture is moving.</p>
+            <div class="module-body">
+              <div class="field-row">
+                <label for="watchQuality">Playback quality</label>
+                <select id="watchQuality" class="select">
+                  <option value="auto" selected>Auto</option>
+                  <option value="performance">Performance</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="quality">Quality</option>
+                  <option value="maximum">Maximum</option>
+                </select>
+              </div>
+              <p class="field-help">Auto keeps motion smooth and raises quality only
+                when there is headroom. Never affects Create's offline AI quality.</p>
+
+              <div class="field-row switch-row">
+                <label for="adaptiveToggle">Adaptive quality</label>
+                <input type="checkbox" id="adaptiveToggle" class="switch" checked>
+              </div>
+              <p class="field-help last">Lowers the render resolution if the GPU cannot
+                keep up, instead of stuttering.</p>
+            </div>
           </div>
 
-          <div class="field-row">
-            <label for="createQuality">Quality <span class="val" id="createQualityVal">70</span></label>
-            <input type="range" id="createQuality" min="10" max="100" step="1" value="70">
+          <div class="module">
+            <div class="module-head">
+              <h3>Output / display</h3>
+              <span class="module-tag" id="renderScaleTag"></span>
+            </div>
+            <p class="module-purpose">How many pixels the enhanced frame is rendered at.</p>
+            <div class="module-body">
+              <div class="field-row">
+                <label for="scaleSelect">Render resolution</label>
+                <select id="scaleSelect" class="select">
+                  <option value="auto">Auto — match display</option>
+                  <option value="1">1× source</option>
+                  <option value="1.5">1.5×</option>
+                  <option value="2">2×</option>
+                  <option value="3">3×</option>
+                  <option value="4">4×</option>
+                </select>
+              </div>
+              <p class="field-help last">Auto renders exactly enough pixels for your
+                screen. Higher values look sharper only if your display can show them.</p>
+            </div>
           </div>
 
-          <div class="field-row switch-row">
-            <label for="createUseLook">Apply the look from the player</label>
-            <input type="checkbox" id="createUseLook" class="switch" checked>
-          </div>
+          <p class="field-help spaced">A saved look appears in the Looks grid above.
+            “Use in Create” sets the current video as the Create source; the look is
+            applied there as a starting recipe, not as a pixel-identical copy.</p>
 
-          <div class="field-row switch-row">
-            <label for="createAudio">Keep audio</label>
-            <input type="checkbox" id="createAudio" class="switch" checked>
+          <!-- SAVE LOOK. Deliberately not sticky, unlike Create's render
+               action: naming a look is optional and occasional, and a dock
+               pinned to the foot of this panel would permanently cover the
+               Realtime Engine and Display modules below the fold to keep an
+               action nobody is reaching for on screen. Create's dock earns its
+               pin because the render is the point of that workspace. -->
+          <div class="action-dock">
+            <div class="action-dock-head"><h4>Save look</h4></div>
+            <div class="save-preset flush">
+              <input type="text" id="presetName" placeholder="Name this look…" maxlength="40" aria-label="Preset name">
+              <button class="btn btn-ghost" id="savePresetBtn">Save</button>
+            </div>
+            <button class="btn btn-secondary full spaced" id="adjustToCreateBtn">Use in Create</button>
           </div>
-
-          <div class="field-row switch-row">
-            <label for="createLoudness">Normalise loudness (−14 LUFS)</label>
-            <input type="checkbox" id="createLoudness" class="switch">
-          </div>
-
-          <div class="field-row switch-row">
-            <label for="createChunked">Chunked render (pausable)</label>
-            <input type="checkbox" id="createChunked" class="switch">
-          </div>
-          <p class="field-help">Renders in segments and joins them losslessly. Slightly larger files, but the job can be paused and resumed at a segment boundary.</p>
-
-          <!-- What this render will cost, from the plan that will actually
-               run - not from the recipe before the engine resolved it. -->
-          <div class="cost-preview" id="createCostPreview" hidden>
-            <span class="cost-class" id="createCostClass">—</span>
-            <span class="cost-detail" id="createCostDetail"></span>
-          </div>
-
-          <button class="btn btn-accent full" id="startCreateBtn">Choose destination &amp; render</button>
-          <div class="recipe-warnings" id="recipeWarnings"></div>
-
-          <div class="save-preset">
-            <input type="text" id="recipeName" placeholder="Save these settings as…" maxlength="60">
-            <button class="btn btn-ghost" id="saveRecipeBtn">Save</button>
-          </div>
-          <div class="recent-list" id="savedRecipeList"></div>
         </section>
 
-        <!-- Queue -->
-        <section class="tab-page" data-page="queue">
-          <div class="library-head">
-            <h3>Render queue</h3>
-            <button class="link-btn" id="clearJobsBtn">Clear finished</button>
+        <!-- ───────────── CREATE ───────────── -->
+        <section class="tab-page" data-page="create" role="tabpanel" aria-label="Create">
+          <!-- Create is also the application's starting point, so it says what
+               it is before it says what it does. The strip beneath is real
+               state — what is queued, what is installed — and doubles as the
+               way into the workspaces that own each of those. -->
+          <div class="workspace-intro">
+            <span class="intro-eyebrow">Command centre</span>
+            <h3>Build a file</h3>
+            <p>Renders a new file with ffmpeg: repair, rescale, reframe, grade, audio,
+              encode, verify. A different engine from the live preview, so the result is
+              based on your look rather than pixel-identical to it.</p>
+            <div class="intro-stats" id="createHomeStats"></div>
           </div>
-          <div class="jobs" id="jobList"></div>
+
+          <!-- AUTO -->
+          <div class="module auto-block" id="autoBlock">
+            <div class="module-head">
+              <h3>Auto</h3>
+              <span class="ai-state" id="autoState">No source</span>
+            </div>
+            <p class="module-purpose">Reads the source and proposes a recipe, then says why.</p>
+            <div class="module-body">
+              <div class="field-row">
+                <label for="autoProfile">Content</label>
+                <select id="autoProfile" class="select"></select>
+              </div>
+              <div class="field-row">
+                <label for="autoIntensity">Intensity</label>
+                <select id="autoIntensity" class="select">
+                  <option value="light">Light</option>
+                  <option value="balanced" selected>Balanced</option>
+                  <option value="strong">Strong</option>
+                  <option value="maximum">Maximum</option>
+                </select>
+              </div>
+              <button class="btn btn-secondary full" id="autoBuildBtn">Suggest settings</button>
+              <div class="auto-explain" id="autoExplain" hidden></div>
+            </div>
+          </div>
+
+          <!-- OUTPUT -->
+          <details class="group" id="groupOutput" open>
+            <summary><span class="module-index">01</span>Output <span class="gtag" id="tagOutput"></span></summary>
+            <div class="group-body">
+              <div class="field-row">
+                <label for="createPreset">Export preset</label>
+                <select id="createPreset" class="select"><option value="">Custom…</option></select>
+              </div>
+              <div class="field-row">
+                <label for="createPlatform">Target</label>
+                <select id="createPlatform" class="select"></select>
+              </div>
+
+              <!-- Target seeds geometry; aspect and resolution set it. Three
+                   separate questions, three separate controls. -->
+              <div class="field-row">
+                <label for="createAspect">Aspect ratio</label>
+                <select id="createAspect" class="select"></select>
+              </div>
+              <div class="field-row" id="createAspectCustomRow" hidden>
+                <label for="createAspectW">Ratio</label>
+                <div class="dim-pair">
+                  <input id="createAspectW" class="input" type="number" min="1" max="1000" value="16"
+                         aria-label="Aspect width">
+                  <span>:</span>
+                  <input id="createAspectH" class="input" type="number" min="1" max="1000" value="9"
+                         aria-label="Aspect height">
+                </div>
+              </div>
+
+              <div class="field-row">
+                <label for="createRes">Resolution</label>
+                <select id="createRes" class="select">
+                  <option value="auto">Suggested for this ratio</option>
+                  <option value="source">Same as source</option>
+                  <option value="1280x720">1280 × 720</option>
+                  <option value="1920x1080">1920 × 1080</option>
+                  <option value="2560x1440">2560 × 1440</option>
+                  <option value="3840x2160">3840 × 2160 (4K)</option>
+                  <option value="custom">Custom…</option>
+                </select>
+              </div>
+              <div class="field-row" id="createResCustomRow" hidden>
+                <label for="createResW">Dimensions</label>
+                <div class="dim-pair">
+                  <input id="createResW" class="input" type="number" min="16" max="16384" step="2" value="1920"
+                         aria-label="Output width">
+                  <span>×</span>
+                  <input id="createResH" class="input" type="number" min="16" max="16384" step="2" value="1080"
+                         aria-label="Output height">
+                </div>
+              </div>
+              <p class="field-help last" id="createGeometryNote"></p>
+            </div>
+          </details>
+
+          <!-- FRAMING -->
+          <details class="group" id="groupFraming">
+            <summary><span class="module-index">02</span>Framing <span class="gtag" id="tagFraming"></span></summary>
+            <div class="group-body">
+              <div class="field-row" id="createFramingRow">
+                <label for="createFraming">Reframing</label>
+                <select id="createFraming" class="select">
+                  <option value="smart">Smart Reframe</option>
+                  <option value="fill">Centre crop</option>
+                  <option value="fit">Fit, blurred background</option>
+                  <option value="fit-black">Fit, black bars</option>
+                </select>
+              </div>
+              <!-- The static copy names the backend that is always there:
+                   motion and detail saliency. Whether the optional detector is
+                   installed is a runtime fact, so it is stated by the note
+                   below rather than promised here. -->
+              <p class="field-help" id="createFramingHelp">Smart Reframe follows the
+                moving, in-focus subject using motion and detail saliency, and holds the
+                last good position when it cannot find one. It is not face detection on
+                its own — the optional detector adds that. A clip with nothing trackable
+                stays centred and the job says so.</p>
+              <p class="field-help last" id="createSemanticNote"></p>
+            </div>
+          </details>
+
+          <!-- ENHANCEMENT -->
+          <details class="group" id="groupEnhancement">
+            <summary><span class="module-index">03</span>Enhancement <span class="gtag" id="tagEnhancement"></span></summary>
+            <div class="group-body">
+              <div class="ai-block bare" id="aiBlock">
+                <div class="ai-head">
+                  <strong>Neural engines</strong>
+                  <span class="ai-state" id="aiEngineState">Checking…</span>
+                </div>
+
+                <div class="field-row">
+                  <label for="createAi">Neural enhancement</label>
+                  <select id="createAi" class="select">
+                    <option value="off" selected>Off</option>
+                    <option value="restore">Restore — same size</option>
+                    <option value="2">Upscale 2×</option>
+                    <option value="4">Upscale 4×</option>
+                  </select>
+                </div>
+                <p class="field-help" id="createAiNote" hidden></p>
+
+                <div class="field-row" id="createAiQualityRow" hidden>
+                  <label for="createAiQuality">Inference quality</label>
+                  <select id="createAiQuality" class="select">
+                    <option value="fast">Fast</option>
+                    <option value="balanced" selected>Balanced</option>
+                    <option value="quality">Quality</option>
+                    <option value="maximum">Maximum</option>
+                  </select>
+                </div>
+                <!-- The resolved plan in one line, with the full reasoning behind
+                     "Why?" rather than a paragraph nobody reads. -->
+                <div class="resolved-note" id="createAiQualityNote" hidden></div>
+
+                <div class="field-row" id="createAiModelRow" hidden>
+                  <label for="createAiModel">Model</label>
+                  <select id="createAiModel" class="select">
+                    <option value="auto">Auto</option>
+                    <option value="general">General</option>
+                    <option value="animation">Animation</option>
+                  </select>
+                </div>
+
+                <button class="btn btn-secondary full" id="installEnginesBtn" hidden>Install AI engines</button>
+                <div class="engine-progress" id="engineProgress" hidden></div>
+              </div>
+            </div>
+          </details>
+
+          <!-- MOTION -->
+          <details class="group" id="groupMotion">
+            <summary><span class="module-index">04</span>Motion <span class="gtag" id="tagMotion"></span></summary>
+            <div class="group-body">
+              <div class="field-row">
+                <label for="createFps">Frame rate</label>
+                <select id="createFps" class="select">
+                  <option value="source">Same as source</option>
+                  <option value="24">24 fps</option>
+                  <option value="25">25 fps</option>
+                  <option value="30">30 fps</option>
+                  <option value="48">48 fps</option>
+                  <option value="50">50 fps</option>
+                  <option value="60">60 fps</option>
+                  <option value="120">120 fps</option>
+                </select>
+              </div>
+              <div class="field-row">
+                <label for="createInterp">Interpolation</label>
+                <select id="createInterp" class="select">
+                  <option value="off" selected>Preserve — no new frames</option>
+                  <option value="classical">Classical — duplicate frames</option>
+                  <option value="ai">AI — RIFE generates frames</option>
+                </select>
+              </div>
+              <p class="field-help" id="createFpsHelp">Frames are duplicated or dropped
+                to hit the target. AI interpolation generates genuinely new
+                intermediate frames.</p>
+
+              <div class="field-row switch-row" id="createSceneRow" hidden>
+                <label for="createScene">Scene-cut protection</label>
+                <input type="checkbox" id="createScene" class="switch" checked>
+              </div>
+              <p class="field-help last" id="createSceneHelp" hidden>Detects hard
+                cuts and interpolates each shot separately, so two different shots are
+                never blended into one another.</p>
+            </div>
+          </details>
+
+          <!-- COLOUR -->
+          <details class="group" id="groupColor">
+            <summary><span class="module-index">05</span>Colour <span class="gtag" id="tagColor"></span></summary>
+            <div class="group-body">
+              <div class="field-row switch-row">
+                <label for="createUseLook">Apply the look from the player</label>
+                <input type="checkbox" id="createUseLook" class="switch" checked>
+              </div>
+              <p class="field-help last">Turns the live preview's
+                denoise, artefact cleanup, debanding, grain, sharpening and grade into a
+                starting recipe. Colour finishing runs after any neural stage, because
+                the network changes the image being graded.</p>
+            </div>
+          </details>
+
+          <!-- AUDIO -->
+          <details class="group" id="groupAudio">
+            <summary><span class="module-index">06</span>Audio <span class="gtag" id="tagAudio"></span></summary>
+            <div class="group-body">
+              <div class="field-row switch-row">
+                <label for="createAudio">Keep audio</label>
+                <input type="checkbox" id="createAudio" class="switch" checked>
+              </div>
+              <div class="field-row switch-row">
+                <label for="createLoudness">Normalise loudness (−14 LUFS)</label>
+                <input type="checkbox" id="createLoudness" class="switch">
+              </div>
+              <p class="field-help last" id="createAudioNote">Audio is
+                encoded once, at the final mux, so it cannot drift chunk by chunk.</p>
+            </div>
+          </details>
+
+          <!-- ADVANCED -->
+          <details class="advanced" id="groupAdvanced">
+            <summary>Advanced</summary>
+            <div class="advanced-body">
+              <div class="field-row">
+                <label for="createEncoder">Encoder</label>
+                <select id="createEncoder" class="select">
+                  <option value="auto">Automatic — prefer hardware</option>
+                </select>
+              </div>
+              <div class="field-row">
+                <label for="createQuality">Quality <span class="val" id="createQualityVal">70</span></label>
+                <input type="range" id="createQuality" min="10" max="100" step="1" value="70" aria-label="Encode quality">
+              </div>
+              <div class="field-row switch-row">
+                <label for="createChunked">Chunked render — pausable</label>
+                <input type="checkbox" id="createChunked" class="switch">
+              </div>
+              <div class="field-row">
+                <label for="createGpu">GPU</label>
+                <select id="createGpu" class="select">
+                  <option value="auto">Auto</option>
+                </select>
+              </div>
+              <div class="field-row">
+                <label for="createTile">Tile size</label>
+                <select id="createTile" class="select">
+                  <option value="">Auto — shrinks on out-of-memory</option>
+                  <option value="512">512</option>
+                  <option value="256">256</option>
+                  <option value="128">128</option>
+                  <option value="64">64</option>
+                </select>
+              </div>
+              <div class="field-row">
+                <label for="createSceneThreshold">Scene-cut sensitivity <span class="val" id="createSceneThresholdVal">0.35</span></label>
+                <input type="range" id="createSceneThreshold" min="0.05" max="0.9" step="0.05" value="0.35">
+              </div>
+              <p class="field-help last" id="createModelDetail">—</p>
+            </div>
+          </details>
+
+          <div class="section">
+            <div class="section-head"><h3>Saved recipes</h3></div>
+            <div class="save-preset flush">
+              <input type="text" id="recipeName" placeholder="Save these settings as…" maxlength="60" aria-label="Recipe name">
+              <button class="btn btn-ghost" id="saveRecipeBtn">Save</button>
+            </div>
+            <div class="recent-list spaced" id="savedRecipeList"></div>
+          </div>
+
+          <!-- ACTION. One processing summary, one primary action, and it is
+               the last thing in the page so it can hold the foot of the
+               inspector while the recipe above it scrolls. -->
+          <div class="action-dock is-sticky">
+            <div class="action-dock-head">
+              <h4>Processing summary</h4>
+            </div>
+            <div class="render-summary" id="renderSummary"></div>
+            <div class="cost-preview" id="createCostPreview" hidden>
+              <span class="cost-class" id="createCostClass">—</span>
+              <span class="cost-detail" id="createCostDetail"></span>
+            </div>
+            <button class="btn btn-accent full lg" id="startCreateBtn">Choose destination &amp; render</button>
+            <div class="recipe-warnings" id="recipeWarnings"></div>
+          </div>
         </section>
 
-        <!-- Library -->
-        <section class="tab-page" data-page="library">
+        <!-- ───────────── QUEUE ─────────────
+             A render-management workspace: the list of jobs beside the state of
+             the machine that is working through them. -->
+        <section class="tab-page" data-page="queue" role="tabpanel" aria-label="Queue">
+          <div class="queue-layout">
+            <div class="queue-main">
+              <div class="library-head">
+                <h3>Render queue</h3>
+                <div class="library-head-actions">
+                  <span class="muted small flush" id="queueSummary"></span>
+                  <button class="link-btn" id="clearJobsBtn">Clear finished</button>
+                </div>
+              </div>
+              <div class="jobs" id="jobList"></div>
+            </div>
+
+            <aside class="queue-side" aria-label="Queue status">
+              <section class="col-module">
+                <div class="col-head"><h3>Throughput</h3><span class="col-tag" id="queueStateTag"></span></div>
+                <div class="spec-list" id="queueStats"></div>
+              </section>
+
+              <!-- The running render's own account: the stages it will pass
+                   through, the plan the job manager resolved and why it costs
+                   what it costs. All of it read off the job record — with
+                   nothing running the module says so rather than showing a
+                   dimmed template. -->
+              <section class="col-module">
+                <div class="col-head"><h3>Active render</h3><span class="col-tag" id="queueActiveTag"></span></div>
+                <div class="queue-active" id="queueActive"></div>
+              </section>
+
+              <section class="col-module">
+                <div class="col-head"><h3>Engines</h3></div>
+                <div class="spec-list" id="queueEngines"></div>
+              </section>
+
+              <section class="col-module">
+                <div class="col-head"><h3>Storage</h3></div>
+                <div class="spec-list" id="queueStorage"></div>
+              </section>
+
+              <p class="field-help last">Renders run one at a time. Chunked jobs can be
+                paused and resumed; the rest run to completion or fail with a reason on
+                the row.</p>
+            </aside>
+          </div>
+        </section>
+
+        <!-- ───────────── LIBRARY ───────────── -->
+        <section class="tab-page" data-page="library" role="tabpanel" aria-label="Library">
           <div class="library-head">
-            <h3>Recent</h3>
-            <button class="link-btn" id="clearRecentsBtn">Clear</button>
+            <h3>Recent media</h3>
+            <div class="library-head-actions">
+              <span class="muted small flush" id="librarySummary"></span>
+              <button class="link-btn" id="clearRecentsBtn">Clear</button>
+            </div>
           </div>
           <div class="recent-list" id="recentList"></div>
         </section>
@@ -476,155 +842,241 @@
     </aside>
   </main>
 
-  <!-- ───────────────────────── Drop overlay ───────────────────────── -->
+  <!-- ═══════════════════════════ Status bar ══════════════════════════════ -->
+  <footer class="statusbar" id="statusbar">
+    <span class="sb-item sb-brand" id="sbVersion">Visionance</span>
+    <span class="sb-item" id="sbHealth"><span class="dot-state"></span><span class="sb-text">Starting…</span></span>
+    <span class="sb-sep"></span>
+    <span class="sb-item sb-right" id="sbRender">No active renders</span>
+    <span class="sb-item sb-right sb-device" id="sbDevice"></span>
+  </footer>
+
+  <!-- ═══════════════════════════ Drop overlay ════════════════════════════ -->
   <div class="drop-overlay" id="dropOverlay" hidden>
     <div class="drop-card">
-      <div class="drop-icon">↧</div>
+      <div class="drop-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v13"/><path d="M6.5 10.5L12 16l5.5-5.5"/><path d="M4 20h16"/>
+        </svg>
+      </div>
       <p>Release to play</p>
     </div>
   </div>
 
-  <!-- ───────────────────────── Settings modal ───────────────────────── -->
+  <!-- ═══════════════════════════ Settings ════════════════════════════════ -->
   <div class="modal-backdrop" id="settingsModal" hidden>
-    <div class="modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Settings">
       <header class="modal-head">
         <h2>Settings</h2>
-        <button class="icon-btn" id="closeSettings">✕</button>
+        <button class="icon-btn" id="closeSettings" aria-label="Close settings">✕</button>
       </header>
 
-      <div class="modal-body">
-        <section class="settings-block">
-          <h3>Online video</h3>
-          <div class="dep-row" id="ytdlpRow">
-            <div>
-              <strong>yt-dlp</strong>
-              <p class="muted" id="ytdlpStatus">Checking…</p>
+      <div class="modal-split">
+        <nav class="modal-nav" id="settingsNav" aria-label="Settings sections">
+          <button data-settings="playback" class="active">Playback</button>
+          <button data-settings="online">Online video</button>
+          <button data-settings="engines">AI engines</button>
+          <button data-settings="models">Models</button>
+          <button data-settings="export">Export</button>
+          <button data-settings="storage">Storage &amp; cache</button>
+          <button data-settings="diagnostics">Diagnostics</button>
+          <button data-settings="about">About</button>
+        </nav>
+
+        <div class="modal-body">
+          <section class="settings-block" data-settings-page="playback">
+            <h3>Playback</h3>
+            <div class="field-row switch-row">
+              <label for="autoplayToggle">Play automatically when a video opens</label>
+              <input type="checkbox" id="autoplayToggle" class="switch" checked>
             </div>
-            <div class="dep-actions">
-              <button class="btn btn-ghost" id="installYtdlpBtn">Install</button>
-              <button class="btn btn-ghost" id="locateYtdlpBtn">Locate…</button>
+            <div class="field-row switch-row">
+              <label for="resumeToggle">Remember playback position</label>
+              <input type="checkbox" id="resumeToggle" class="switch" checked>
             </div>
-          </div>
-          <div class="field-row">
-            <label for="maxHeight">Maximum stream height</label>
-            <select id="maxHeight" class="select">
-              <option value="0" selected>Auto (match this display)</option>
-              <option value="720">720p (lightest)</option>
-              <option value="1080">1080p</option>
-              <option value="1440">1440p</option>
-              <option value="2160">2160p</option>
-            </select>
-          </div>
-          <p class="field-help">Auto picks the smallest stream that still fills your window, which is usually what makes playback smooth. Visionance rebuilds detail on the GPU, so a clean 1080p stream often looks better than a starved 4K one. Setting a value here overrides Auto exactly.</p>
-
-          <div class="field-row">
-            <label for="authMode">Sign-in for restricted videos</label>
-            <select id="authMode" class="select">
-              <option value="none">Public videos only</option>
-              <option value="browser">Cookies from a browser</option>
-              <option value="file">cookies.txt file</option>
-            </select>
-          </div>
-          <p class="field-help">Public links are always resolved anonymously first. Whatever you choose here is only used if a site actually says the video needs an account you already have.</p>
-
-          <div class="field-row" id="authBrowserRow" hidden>
-            <label for="authBrowser">Browser</label>
-            <select id="authBrowser" class="select">
-              <option value="chrome">Chrome</option>
-              <option value="edge">Edge</option>
-              <option value="firefox">Firefox</option>
-              <option value="brave">Brave</option>
-              <option value="chromium">Chromium</option>
-              <option value="opera">Opera</option>
-              <option value="vivaldi">Vivaldi</option>
-              <option value="safari">Safari</option>
-            </select>
-          </div>
-
-          <div class="dep-row" id="authFileRow" hidden>
-            <div>
-              <strong>cookies.txt</strong>
-              <p class="muted" id="authFileStatus">No file chosen.</p>
+            <div class="field-row">
+              <label for="targetFpsSelect">Frame budget target</label>
+              <select id="targetFpsSelect" class="select">
+                <option value="30">30 fps</option>
+                <option value="60" selected>60 fps</option>
+                <option value="120">120 fps</option>
+              </select>
             </div>
-            <div class="dep-actions">
-              <button class="btn btn-ghost" id="pickCookiesBtn">Choose…</button>
+            <p class="field-help">Only used as a fallback: the engine takes its real
+              frame budget from the source's own cadence, so a 24 fps film is judged
+              against 41.7 ms rather than 16.7 ms.</p>
+          </section>
+
+          <section class="settings-block" data-settings-page="online" hidden>
+            <h3>Online video</h3>
+            <div class="dep-row" id="ytdlpRow">
+              <div>
+                <strong><span class="dot-state" id="ytdlpDot"></span>yt-dlp</strong>
+                <p class="muted" id="ytdlpStatus">Checking…</p>
+              </div>
+              <div class="dep-actions">
+                <button class="btn btn-ghost" id="installYtdlpBtn">Install</button>
+                <button class="btn btn-ghost" id="locateYtdlpBtn">Locate…</button>
+              </div>
             </div>
-          </div>
-        </section>
-
-        <section class="settings-block">
-          <h3>JavaScript runtime</h3>
-          <div class="dep-row">
-            <div>
-              <strong>For yt-dlp</strong>
-              <p class="muted" id="runtimeStatus">Checking…</p>
+            <div class="dep-row">
+              <div>
+                <strong><span class="dot-state" id="runtimeDot"></span>JavaScript runtime</strong>
+                <p class="muted" id="runtimeStatus">Checking…</p>
+              </div>
+              <div class="dep-actions">
+                <button class="btn btn-ghost" id="installRuntimeBtn">Install</button>
+              </div>
             </div>
-            <div class="dep-actions">
-              <button class="btn btn-ghost" id="installRuntimeBtn">Install</button>
+            <p class="field-help">Modern yt-dlp needs a JavaScript runtime to read some
+              sites. Visionance uses one it finds on your machine; this only installs a
+              private copy if there is none.</p>
+
+            <div class="field-row">
+              <label for="maxHeight">Maximum stream height</label>
+              <select id="maxHeight" class="select">
+                <option value="0" selected>Auto — match this display</option>
+                <option value="720">720p (lightest)</option>
+                <option value="1080">1080p</option>
+                <option value="1440">1440p</option>
+                <option value="2160">2160p</option>
+              </select>
             </div>
-          </div>
-          <p class="field-help">Modern yt-dlp needs a JavaScript runtime to read some sites. Visionance uses one it finds on your machine; this only installs a private copy if there is none.</p>
-        </section>
+            <p class="field-help">Auto picks the smallest stream that still fills your
+              window. Visionance rebuilds detail on the GPU, so a clean 1080p stream
+              often looks better than a starved 4K one.</p>
 
-        <section class="settings-block">
-          <h3>AI engines</h3>
-          <div id="engineList"></div>
-          <p class="field-help">Neural upscaling and frame interpolation run locally on your GPU through Vulkan — no Python, no CUDA toolkit, nothing to configure. Engines are downloaded into your user data folder, not the app folder.</p>
-        </section>
-
-        <section class="settings-block">
-          <h3>This machine</h3>
-          <p class="muted small" id="capabilityText">Checking…</p>
-        </section>
-
-        <section class="settings-block">
-          <h3>Encoding</h3>
-          <div class="dep-row">
-            <div>
-              <strong>ffmpeg</strong>
-              <p class="muted" id="ffmpegStatus">Checking…</p>
+            <div class="field-row">
+              <label for="authMode">Sign-in for restricted videos</label>
+              <select id="authMode" class="select">
+                <option value="none">Public videos only</option>
+                <option value="browser">Cookies from a browser</option>
+                <option value="file">cookies.txt file</option>
+              </select>
             </div>
-            <div class="dep-actions">
-              <button class="btn btn-ghost" id="locateFfmpegBtn">Locate…</button>
+            <p class="field-help">Public links are always resolved anonymously first.
+              Whatever you choose here is only used if a site says the video needs an
+              account you already have.</p>
+
+            <div class="field-row" id="authBrowserRow" hidden>
+              <label for="authBrowser">Browser</label>
+              <select id="authBrowser" class="select">
+                <option value="chrome">Chrome</option>
+                <option value="edge">Edge</option>
+                <option value="firefox">Firefox</option>
+                <option value="brave">Brave</option>
+                <option value="chromium">Chromium</option>
+                <option value="opera">Opera</option>
+                <option value="vivaldi">Vivaldi</option>
+                <option value="safari">Safari</option>
+              </select>
             </div>
-          </div>
-        </section>
 
-        <section class="settings-block">
-          <h3>Playback</h3>
-          <div class="field-row switch-row">
-            <label for="autoplayToggle">Play automatically when a video opens</label>
-            <input type="checkbox" id="autoplayToggle" class="switch" checked>
-          </div>
-          <div class="field-row switch-row">
-            <label for="resumeToggle">Remember playback position</label>
-            <input type="checkbox" id="resumeToggle" class="switch" checked>
-          </div>
-          <div class="field-row">
-            <label for="targetFpsSelect">Frame budget target</label>
-            <select id="targetFpsSelect" class="select">
-              <option value="30">30 fps</option>
-              <option value="60" selected>60 fps</option>
-              <option value="120">120 fps</option>
-            </select>
-          </div>
-        </section>
+            <div class="dep-row" id="authFileRow" hidden>
+              <div>
+                <strong>cookies.txt</strong>
+                <p class="muted" id="authFileStatus">No file chosen.</p>
+              </div>
+              <div class="dep-actions">
+                <button class="btn btn-ghost" id="pickCookiesBtn">Choose…</button>
+              </div>
+            </div>
+          </section>
 
-        <section class="settings-block">
-          <h3>About</h3>
-          <p class="muted" id="aboutText">—</p>
-          <p class="muted small">Visionance renders enhancement on your GPU in real time. Online playback is resolved with yt-dlp; only sources you are entitled to access should be used.</p>
-        </section>
+          <section class="settings-block" data-settings-page="engines" hidden>
+            <h3>AI engines</h3>
+            <div id="engineList"></div>
+            <p class="field-help">Neural upscaling and frame interpolation run locally on
+              your GPU through Vulkan — no Python, no CUDA toolkit, nothing to configure.
+              Engines are downloaded into your user data folder, not the app folder.</p>
+          </section>
+
+          <section class="settings-block" data-settings-page="models" hidden>
+            <h3>Smart Reframe subject detection</h3>
+            <div class="dep-row">
+              <div>
+                <strong><span class="dot-state" id="semanticDot"></span>Face &amp; person detection</strong>
+                <p class="muted small" id="semanticStatus">Checking…</p>
+              </div>
+              <div class="dep-actions">
+                <button class="btn btn-ghost" id="installSemanticBtn" hidden>Install</button>
+                <button class="btn btn-ghost" id="removeSemanticBtn" hidden>Remove</button>
+              </div>
+            </div>
+            <p class="field-help">Optional. Smart Reframe already follows motion and
+              detail; these models additionally recognise faces and people, so a subject
+              standing still is not lost to a busy background. Detection runs locally on
+              the CPU during a render — never during playback. Without them Smart Reframe
+              still works from motion and detail alone.</p>
+            <details class="advanced">
+              <summary>Model detail</summary>
+              <div class="advanced-body">
+                <p class="muted small flush" id="semanticDetail">—</p>
+              </div>
+            </details>
+          </section>
+
+          <section class="settings-block" data-settings-page="export" hidden>
+            <h3>Encoding</h3>
+            <div class="dep-row">
+              <div>
+                <strong><span class="dot-state" id="ffmpegDot"></span>ffmpeg</strong>
+                <p class="muted" id="ffmpegStatus">Checking…</p>
+              </div>
+              <div class="dep-actions">
+                <button class="btn btn-ghost" id="locateFfmpegBtn">Locate…</button>
+              </div>
+            </div>
+            <p class="field-help">Every completed render is ffprobe-verified before the
+              job reports success: the file decodes, has a plausible duration, matches the
+              requested resolution and frame rate, and has audio when audio was asked
+              for.</p>
+          </section>
+
+          <section class="settings-block" data-settings-page="storage" hidden>
+            <h3>Storage &amp; cache</h3>
+            <div class="dep-row">
+              <div>
+                <strong>Thumbnail cache</strong>
+                <p class="muted" id="thumbCacheStatus">Checking…</p>
+              </div>
+              <div class="dep-actions">
+                <button class="btn btn-ghost" id="clearThumbsBtn">Clear</button>
+              </div>
+            </div>
+            <p class="field-help">One thumbnail per source, extracted once and reused by
+              Create, the Queue and the Library. Clearing it only costs the time to
+              re-extract.</p>
+          </section>
+
+          <section class="settings-block" data-settings-page="diagnostics" hidden>
+            <h3>This machine</h3>
+            <p class="muted small" id="capabilityText">Checking…</p>
+            <div class="section action-section">
+              <div class="section-head"><h4>Live performance</h4></div>
+              <div class="telemetry" id="settingsTelemetry"></div>
+            </div>
+          </section>
+
+          <section class="settings-block" data-settings-page="about" hidden>
+            <h3>About</h3>
+            <p class="muted" id="aboutText">—</p>
+            <p class="field-help spaced">Visionance renders enhancement
+              on your GPU in real time. Online playback is resolved with yt-dlp; only
+              sources you are entitled to access should be used.</p>
+          </section>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- ───────────────────────── Info modal ───────────────────────── -->
+  <!-- ═══════════════════════════ How it works ════════════════════════════ -->
   <div class="modal-backdrop" id="infoModal" hidden>
-    <div class="modal narrow">
+    <div class="modal narrow" role="dialog" aria-modal="true" aria-label="How Visionance works">
       <header class="modal-head">
         <h2>How Visionance works</h2>
-        <button class="icon-btn" id="closeInfo">✕</button>
+        <button class="icon-btn" id="closeInfo" aria-label="Close">✕</button>
       </header>
       <div class="modal-body prose">
         <p>Every frame passes through four GPU shader stages before it reaches your screen:</p>
@@ -634,8 +1086,8 @@
           <li><strong>Sharpen</strong> — contrast-adaptive sharpening: strong where the picture is soft, restrained where it is already detailed, with halo suppression.</li>
           <li><strong>Finish</strong> — debanding, local contrast, tone curve and colour.</li>
         </ol>
-        <p>Nothing is written to disk and nothing is re-encoded, so a 1080p stream can look close to a native 4K file without the 20&nbsp;GB download or the wait.</p>
-        <p>When you need a file — for uploading or sending to someone — the <strong>Create</strong> tab renders one with ffmpeg: repair, rescale, reframe for Shorts or Reels, grade, audio and a verified encode. That is a different engine from this live preview, so treat the result as based on your look rather than identical to it.</p>
+        <p>Nothing is written to disk and nothing is re-encoded, so a 1080p stream can look close to a native 4K file without the download or the wait.</p>
+        <p>When you need a file, the <strong>Create</strong> workspace renders one with ffmpeg: repair, rescale, reframe for Shorts or Reels, grade, audio and a verified encode. That is a different engine from this live preview, so treat the result as based on your look rather than identical to it.</p>
       </div>
     </div>
   </div>
@@ -646,6 +1098,9 @@
 <script src="js/shaders.js"></script>
 <script src="js/engine.js"></script>
 <script src="js/presets.js"></script>
+<script src="js/ui-kit.js"></script>
+<script src="js/thumbs.js"></script>
+<script src="js/telemetry-ui.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

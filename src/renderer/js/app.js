@@ -12,39 +12,17 @@
   const api = window.visionance;
   const { Engine } = window.VSEngine;
   const { BUILTIN, CONTROLS } = window.VSPresets;
+  const { ICONS, togglePopover, closePopover, fmtTime, fmtBytes, chip } = window.VSUiKit;
+  const thumbs = window.VSThumbs;
+  const telemetry = window.VSTelemetry;
 
   const $ = (id) => document.getElementById(id);
 
-  /* ------------------------------------------------------------------ *
-   * Icons
-   *
-   * Inline SVG rather than unicode glyphs: symbols like ⟲ and ⧉ render as
-   * empty boxes on any machine without a font that covers them, which looks
-   * broken on exactly the low-end hardware this app is aimed at.
-   * ------------------------------------------------------------------ */
-
-  const svg = (body, fill) =>
-    `<svg viewBox="0 0 24 24" width="18" height="18" fill="${fill ? 'currentColor' : 'none'}" ` +
-    `stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
-
-  const ICONS = {
-    play: svg('<path d="M7 4.5v15l12-7.5z"/>', true),
-    pause: svg('<rect x="7" y="5" width="3.5" height="14" rx="1"/><rect x="13.5" y="5" width="3.5" height="14" rx="1"/>', true),
-    back10: svg('<path d="M11 8H6.5V3.5"/><path d="M6.9 8.2A7.5 7.5 0 1 1 4.6 14"/><text x="12" y="15.6" font-size="7.5" stroke="none" fill="currentColor" text-anchor="middle" font-family="sans-serif">10</text>'),
-    fwd10: svg('<path d="M13 8h4.5V3.5"/><path d="M17.1 8.2A7.5 7.5 0 1 0 19.4 14"/><text x="12" y="15.6" font-size="7.5" stroke="none" fill="currentColor" text-anchor="middle" font-family="sans-serif">10</text>'),
-    volume: svg('<path d="M4 9.5h3.5L12 5.5v13L7.5 14.5H4z"/><path d="M16 9a4.5 4.5 0 0 1 0 6"/><path d="M18.5 6.5a8 8 0 0 1 0 11"/>'),
-    mute: svg('<path d="M4 9.5h3.5L12 5.5v13L7.5 14.5H4z"/><path d="M16.5 10l4 4"/><path d="M20.5 10l-4 4"/>'),
-    camera: svg('<rect x="3" y="7" width="18" height="13" rx="2.5"/><circle cx="12" cy="13.5" r="3.6"/><path d="M8.5 7l1.4-2.4h4.2L15.5 7"/>'),
-    pip: svg('<rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><rect x="12" y="11.5" width="8" height="6.5" rx="1.5" fill="currentColor" stroke="none"/>'),
-    fullscreen: svg('<path d="M3.5 9V4.5H8"/><path d="M16 4.5h4.5V9"/><path d="M20.5 15v4.5H16"/><path d="M8 19.5H3.5V15"/>'),
-    exitFullscreen: svg('<path d="M8 3.5V8H3.5"/><path d="M20.5 8H16V3.5"/><path d="M16 20.5V16h4.5"/><path d="M3.5 16H8v4.5"/>'),
-    stats: svg('<path d="M4 19.5V13"/><path d="M9.3 19.5V8"/><path d="M14.7 19.5v-6"/><path d="M20 19.5V4.5"/>'),
-    gear: svg('<circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.5a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.56-1.1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.56 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
-    folder: svg('<path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h4l2 2.5h8a1.5 1.5 0 0 1 1.5 1.5v8.5A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5z"/>'),
-    file: svg('<path d="M6 3.5h7.5L19 9v11.5H6z"/><path d="M13.5 3.5V9H19"/>'),
-    link: svg('<path d="M10 13.5a4 4 0 0 0 5.7 0l2.6-2.6a4 4 0 0 0-5.7-5.7l-1.5 1.5"/><path d="M14 10.5a4 4 0 0 0-5.7 0l-2.6 2.6a4 4 0 0 0 5.7 5.7l1.5-1.5"/>')
-  };
-
+  /**
+   * The icon set lives in ui-kit.js; this only says which button wears which.
+   * Every control that ships a glyph gets one here, so nothing depends on the
+   * host having a font that covers an obscure unicode symbol.
+   */
   function applyIcons() {
     const map = {
       playBtn: ICONS.play,
@@ -52,15 +30,19 @@
       fwd10Btn: ICONS.fwd10,
       muteBtn: ICONS.volume,
       snapshotBtn: ICONS.camera,
+      playerSettingsBtn: ICONS.sliders,
       pipBtn: ICONS.pip,
       fullscreenBtn: ICONS.fullscreen,
       statsBtn: ICONS.stats,
-      settingsBtn: ICONS.gear
+      settingsBtn: ICONS.gear,
+      // The top bar is the window's title bar now, so the file action is an
+      // icon beside the other shell controls rather than a labelled button
+      // competing with the workspace navigation.
+      openFileBtn: ICONS.folder
     };
     for (const [id, icon] of Object.entries(map)) {
       if (el[id]) el[id].innerHTML = icon;
     }
-    el.openFileBtn.innerHTML = `${ICONS.folder}<span>Open file</span>`;
   }
 
   /* ------------------------------------------------------------------ *
@@ -71,11 +53,13 @@
     engine: null,
     media: null,          // descriptor of what is loaded
     params: null,
+    baseParams: {},       // the preset values the current params started from
     presetId: 'balanced',
     userPresets: {},
     settings: null,
     info: null,
     compare: 0,           // 0 off, 1 split
+    workspace: 'presets', // which top-level tab is showing
     presentation: null,   // 'native' | 'enhanced'
     playback: null,       // PlaybackStats
     watchQuality: 'auto',
@@ -106,6 +90,11 @@
     platforms: {},
     encoders: [],
     engines: {},
+    semantic: null,
+    /** Which reading of the job list the operations console is showing. */
+    consoleTab: 'queue',
+    /** Last thumbnail-cache answer, so the console can state it without asking. */
+    thumbCache: null,
     autoResult: null,
     recipeState: 'custom',  // 'auto' | 'modified' | 'custom'
     resumeKey: null,
@@ -160,13 +149,45 @@
     'installEnginesBtn', 'engineProgress', 'createGpu', 'createTile',
     'createSceneThreshold', 'createSceneThresholdVal', 'createModelDetail',
     'engineList', 'runtimeStatus', 'installRuntimeBtn',
+    'semanticStatus', 'installSemanticBtn', 'removeSemanticBtn',
     'jobList', 'clearJobsBtn', 'recentList', 'clearRecentsBtn', 'dropOverlay',
     'settingsModal', 'closeSettings', 'ytdlpStatus', 'installYtdlpBtn', 'locateYtdlpBtn',
     'maxHeight', 'authMode', 'authBrowser', 'authBrowserRow', 'authFileRow',
     'authFileStatus', 'pickCookiesBtn', 'capabilityText',
     'ffmpegStatus', 'locateFfmpegBtn',
     'autoplayToggle', 'resumeToggle', 'targetFpsSelect', 'aboutText',
-    'infoModal', 'closeInfo', 'emptyOpenBtn', 'emptyDemoBtn', 'brandSub'
+    'infoModal', 'closeInfo', 'emptyOpenBtn', 'emptyDemoBtn', 'brandSub',
+    // Shell, player settings, thumbnails, telemetry and the redesigned panels.
+    'queueCount', 'jobStrip', 'playerSettingsBtn', 'playerPopover', 'loopToggle',
+    'popoverQuality', 'popoverSource', 'popoverStats', 'popoverStatsState', 'popoverInfo',
+    'utilityStrip', 'utilitySource', 'utilityQueue', 'utilityTelemetry',
+    'settingsTelemetry', 'settingsNav', 'createThumb', 'createSourceSub',
+    'createSemanticNote', 'renderSummary', 'queueSummary', 'librarySummary',
+    'tagOutput', 'tagFraming', 'tagEnhancement', 'tagMotion', 'tagColor', 'tagAudio',
+    'groupOutput', 'groupFraming', 'groupEnhancement', 'groupMotion',
+    'ytdlpDot', 'runtimeDot', 'ffmpegDot', 'semanticDot', 'semanticDetail',
+    'thumbCacheStatus', 'clearThumbsBtn', 'lookState',
+    // Visual composition: the Watch source card, the console tags and the
+    // render-scale tag. All read-only readouts of existing state.
+    'watchSource', 'watchThumb', 'watchTitle', 'watchMeta', 'watchState',
+    'renderScaleTag', 'utilitySourceTag', 'utilityQueueTag', 'utilityPerfTag',
+    // The workstation shell: source column, process strip, operations console
+    // and status bar. Every one of these is a readout of state that already
+    // exists; none of them polls anything of its own.
+    'topbar', 'sourceColumn', 'sourceSpecs', 'sourceDetails',
+    'createKindTag', 'watchSourceTag',
+    'processStrip', 'psLook', 'psLookTag', 'psEnhance', 'psEnhanceTag',
+    'psEngine', 'psEngineTag',
+    'consoleTabs', 'consoleEngines', 'consoleEngineTag',
+    // Fine Tune, which is the former Adjust inspector living inside Watch.
+    'groupFineTune', 'fineTuneTag', 'adjustEnhanceState', 'adjustRenderTag',
+    'adjustToCreateBtn',
+    'statusbar', 'sbVersion', 'sbHealth', 'sbRender', 'sbDevice',
+    'queueStats', 'queueStateTag', 'queueEngines',
+    'queueActive', 'queueActiveTag', 'queueStorage',
+    // Create as the starting workspace: its state strip and its own recents
+    // intake. Both are readouts of the job map and the recents list.
+    'createHomeStats', 'createRecents', 'createRecentsTag'
   ].forEach((id) => { el[id] = $(id); });
 
   /* ------------------------------------------------------------------ *
@@ -182,24 +203,6 @@
       node.classList.add('leaving');
       setTimeout(() => node.remove(), 220);
     }, ms);
-  }
-
-  function fmtTime(seconds) {
-    if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
-    const s = Math.floor(seconds % 60);
-    const m = Math.floor((seconds / 60) % 60);
-    const h = Math.floor(seconds / 3600);
-    const pad = (n) => String(n).padStart(2, '0');
-    return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
-  }
-
-  function fmtBytes(bytes) {
-    if (!bytes) return '—';
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    let i = 0;
-    let v = bytes;
-    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-    return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
   }
 
   function labelForHeight(h) {
@@ -434,7 +437,7 @@
   /* ------------------------------------------------------------------ *
    * The one source-switch lifecycle
    *
-   * Every route into playback goes through switchSource(): the omnibar, the
+   * Every route into playback goes through switchSource(): the source bar, the
    * file picker, drag-and-drop, the recents list, the menu and a file opened
    * from the shell. There is no second path that "just sets video.src",
    * because two such paths racing each other is precisely what made pasting a
@@ -488,6 +491,7 @@
       window.__vsLastMedia = null;
       if (state.playback) state.playback.reset();
       el.resBadge.textContent = '—';
+      refreshWatchSurfaces();
       hideLoading();
 
       // Release the previous stream session so its CDN URLs and header set do
@@ -548,7 +552,7 @@
       state.resumeKey = descriptor.source;
 
       el.stageEmpty.hidden = true;
-      el.brandSub.textContent = descriptor.title || 'Real-time enhancement';
+      el.brandSub.textContent = descriptor.title || 'No source';
       document.title = `${descriptor.title || 'Visionance'} — Visionance`;
       // A local file has no URL; leaving the previous one in the bar would make
       // the Play button refer to something that is no longer on screen.
@@ -576,13 +580,17 @@
       /* ---- 5. presentation, resume, playback ---- */
       applyPresentationMode();
       updateResBadge();
+      refreshWatchSurfaces();
       api.system.keepAwake(true);
 
       api.recents.add({
         source: descriptor.source,
         kind: descriptor.kind,
         title: descriptor.title,
-        duration: descriptor.info ? descriptor.info.duration : null
+        duration: descriptor.info ? descriptor.info.duration : null,
+        // Recorded so the Library can show this source's real poster later,
+        // without re-resolving the page to ask for it again.
+        thumbnail: descriptor.thumbnail || null
       }).then((r) => { if (!stale() && r.ok) renderRecents(r.recents); });
 
       if (state.settings.rememberPosition && state.resumeKey) {
@@ -616,7 +624,7 @@
   const openUrl = (rawUrl) => switchSource({ kind: 'url', url: rawUrl });
 
   /**
-   * The omnibar's Play button.
+   * Watch's Play button.
    *
    * If the box holds something other than what is playing, Play means "load
    * and play that", not "resume what was already here". Resuming the previous
@@ -723,6 +731,8 @@
 
   function applyParams(params, presetId) {
     state.params = { ...params };
+    // The baseline every "modified" marker and per-slider reset measures from.
+    state.baseParams = { ...params };
     if (presetId) state.presetId = presetId;
     if (state.engine) state.engine.setParams(state.params);
     syncControlValues();
@@ -742,6 +752,9 @@
 
   function renderPresetGrid() {
     const all = [...BUILTIN, ...Object.values(state.userPresets)];
+    // No card is active once a slider has moved, so say so rather than leaving
+    // the grid looking as if nothing is selected for no reason.
+    el.lookState.hidden = state.presetId !== '__custom';
     el.presetGrid.innerHTML = '';
     for (const preset of all) {
       const card = document.createElement('button');
@@ -781,19 +794,47 @@
 
   const sliderRefs = new Map();
 
+  /**
+   * Fine Tune is generated from the slider definitions, so adding a
+   * parameter is one line in presets.js. Each group is a collapsible section
+   * whose summary reports how many of its parameters differ from the preset -
+   * which is the question you actually have when the group is closed.
+   *
+   * Parameter changes go straight to the engine, as they always have: the
+   * shader uniforms are set per draw, so there is nothing to debounce and
+   * nothing that reaches the main process. Debouncing here would only add
+   * latency to a control whose whole point is that it is live.
+   */
   function buildControls() {
     el.controlGroups.innerHTML = '';
-    for (const group of CONTROLS) {
-      const wrap = document.createElement('div');
-      wrap.className = 'ctrl-group';
-      const h = document.createElement('h4');
-      h.textContent = group.group;
-      wrap.appendChild(h);
+    for (const [index, group] of CONTROLS.entries()) {
+      const wrap = document.createElement('details');
+      wrap.className = 'group';
+      // All three open: this is a parameter inspector, and a colourist opening
+      // three disclosures before touching a slider is friction, not tidiness.
+      wrap.open = true;
+      void index;
+
+      // A processing module, not a plain disclosure: an index, a name, a
+      // one-line statement of where in the chain it runs, and a count of what
+      // has been moved off the preset.
+      const summary = document.createElement('summary');
+      const index_mark = document.createElement('span');
+      index_mark.className = 'module-index';
+      index_mark.textContent = String(index + 1).padStart(2, '0');
+      summary.append(index_mark, document.createTextNode(group.group));
+      const tag = document.createElement('span');
+      tag.className = 'gtag';
+      summary.appendChild(tag);
+      wrap.appendChild(summary);
+
+      const body = document.createElement('div');
+      body.className = 'group-body';
       if (group.hint) {
         const hint = document.createElement('p');
-        hint.className = 'ghint';
+        hint.className = 'module-purpose in-body';
         hint.textContent = group.hint;
-        wrap.appendChild(hint);
+        body.appendChild(hint);
       }
 
       for (const item of group.items) {
@@ -805,9 +846,21 @@
         const label = document.createElement('label');
         label.textContent = item.label;
         label.htmlFor = `ctrl_${item.key}`;
+
+        const right = document.createElement('div');
+        right.className = 'ctrl-head-right';
         const val = document.createElement('span');
         val.className = 'cval';
-        head.append(label, val);
+        const reset = document.createElement('button');
+        reset.className = 'ctrl-reset';
+        reset.innerHTML =
+          '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" ' +
+          'stroke-width="2" stroke-linecap="round" aria-hidden="true">' +
+          '<path d="M4.5 9.5A8 8 0 1 1 4 13"/><path d="M3.5 4.5v5h5"/></svg>';
+        reset.title = `Reset ${item.label} to the preset value`;
+        reset.setAttribute('aria-label', `Reset ${item.label}`);
+        right.append(val, reset);
+        head.append(label, right);
 
         const input = document.createElement('input');
         input.type = 'range';
@@ -815,13 +868,36 @@
         input.min = item.min;
         input.max = item.max;
         input.step = item.step;
+        input.setAttribute('aria-label', item.label);
 
-        input.addEventListener('input', () => {
-          const v = parseFloat(input.value);
+        // Where the handle sits in its own range, as a percentage the
+        // stylesheet paints the travelled part of the track with.
+        const paintFill = (v) => {
+          const span = item.max - item.min;
+          const fill = span > 0 ? ((v - item.min) / span) * 100 : 0;
+          input.style.setProperty('--fill', `${Math.max(0, Math.min(100, fill)).toFixed(1)}%`);
+        };
+
+        const apply = (v) => {
           val.textContent = v.toFixed(2);
+          paintFill(v);
           state.params[item.key] = v;
           state.engine && state.engine.setParams({ [item.key]: v });
           markCustom();
+          markControlState(item.key);
+          updateGroupTag(group);
+        };
+
+        input.addEventListener('input', () => apply(parseFloat(input.value)));
+        reset.addEventListener('click', (e) => {
+          e.preventDefault();
+          // Back to the value the preset supplied, not to zero: "reset" means
+          // undo my edit, not blank the parameter.
+          const value = typeof state.baseParams[item.key] === 'number'
+            ? state.baseParams[item.key]
+            : 0;
+          input.value = String(value);
+          apply(value);
         });
 
         ctrl.append(head, input);
@@ -831,11 +907,45 @@
           help.textContent = item.help;
           ctrl.appendChild(help);
         }
-        wrap.appendChild(ctrl);
-        sliderRefs.set(item.key, { input, val });
+        body.appendChild(ctrl);
+        sliderRefs.set(item.key, { input, val, ctrl, group, paintFill });
       }
+      wrap.appendChild(body);
       el.controlGroups.appendChild(wrap);
     }
+  }
+
+  /**
+   * Highlight a parameter that no longer matches the look it came from.
+   *
+   * Compared against `state.baseParams`, the snapshot taken when a preset was
+   * applied - not against the current preset id, which becomes `__custom` the
+   * moment anything moves and would take every marker with it.
+   */
+  function markControlState(key) {
+    const ref = sliderRefs.get(key);
+    if (!ref) return;
+    const base = state.baseParams ? state.baseParams[key] : undefined;
+    const modified = typeof base === 'number' &&
+      Math.abs(base - (state.params[key] || 0)) > 1e-6;
+    ref.ctrl.classList.toggle('modified', modified);
+  }
+
+  function updateGroupTag(group) {
+    const node = el.controlGroups.querySelector(`.group:nth-child(${CONTROLS.indexOf(group) + 1})`);
+    if (!node) return;
+    const tag = node.querySelector('.gtag');
+    const modified = group.items.filter((item) => {
+      const ref = sliderRefs.get(item.key);
+      return ref && ref.ctrl.classList.contains('modified');
+    }).length;
+    if (tag) tag.textContent = modified ? `${modified} changed` : '';
+    // The vermilion edge marker: a module that is no longer at its preset
+    // value is visibly doing something of its own.
+    node.classList.toggle('is-modified', modified > 0);
+    // The strip and the inspector head both report how far this look has been
+    // taken from its preset, so they move with the sliders.
+    refreshLookReadouts();
   }
 
   function syncControlValues() {
@@ -844,8 +954,11 @@
       if (typeof v === 'number') {
         ref.input.value = v;
         ref.val.textContent = v.toFixed(2);
+        ref.paintFill(v);
       }
+      markControlState(key);
     }
+    for (const group of CONTROLS) updateGroupTag(group);
   }
 
   /** Once a slider moves, the selection is no longer a stock preset. */
@@ -884,6 +997,7 @@
 
   function updateResBadge() {
     const v = el.video;
+    el.resBadge.hidden = !v.videoWidth;
     if (!v.videoWidth) { el.resBadge.textContent = '—'; return; }
     const src = labelForHeight(v.videoHeight);
     // Read the canvas directly rather than the stats snapshot, which is only
@@ -892,6 +1006,13 @@
     el.resBadge.textContent = state.params.enabled
       ? `${src} → ${labelForHeight(outH)}`
       : src;
+    if (el.renderScaleTag) {
+      // What the engine resolved, not what the control asked for: "Auto" is
+      // only meaningful once it has landed on a real number.
+      el.renderScaleTag.textContent = state.params.enabled && el.glCanvas.width
+        ? `${el.glCanvas.width}×${el.glCanvas.height}`
+        : '';
+    }
   }
 
   /**
@@ -929,9 +1050,78 @@
   function updateEnhanceToggle() {
     const on = !!state.params.enabled;
     el.enhanceToggle.classList.toggle('off', !on);
+    el.enhanceToggle.setAttribute('aria-pressed', on ? 'true' : 'false');
     el.enhanceToggle.innerHTML = `<span class="dot"></span> Enhancement ${on ? 'on' : 'off'}`;
     applyPresentationMode();
     updateResBadge();
+    refreshWatchSurfaces();
+  }
+
+  /**
+   * The Watch inspector's source card.
+   *
+   * A readout of what is already loaded - the descriptor, the video element
+   * and the engine's own stats. It never asks the backend for anything and it
+   * sits in the inspector rather than over the picture, so it costs the player
+   * no space at all.
+   */
+  function refreshWatchSource() {
+    if (!el.watchSource) return;
+    const media = state.media;
+    const v = el.video;
+
+    if (!media) {
+      el.watchThumb.dataset.thumbId = '';
+      el.watchThumb.dataset.thumbState = '';
+      el.watchThumb.innerHTML = `<div class="thumb-fallback">${ICONS.mediaMark}</div>`;
+      el.watchTitle.textContent = 'Nothing loaded';
+      el.watchTitle.removeAttribute('title');
+      el.watchMeta.textContent = 'Open a file or paste a link to begin.';
+      el.watchState.hidden = true;
+      el.watchSourceTag.textContent = '';
+      return;
+    }
+    el.watchSourceTag.textContent = media.kind === 'stream' ? 'Online' : 'Local';
+
+    const duration = Number.isFinite(v.duration) ? v.duration : (media.info && media.info.duration) || null;
+    thumbs.paint(el.watchThumb, {
+      kind: media.kind,
+      source: media.source,
+      webpageUrl: media.kind === 'stream' ? media.source : null,
+      thumbnail: media.thumbnail || null,
+      durationSeconds: duration
+    }, { duration });
+
+    el.watchTitle.textContent = media.title || media.source;
+    el.watchTitle.title = media.source;
+
+    const bits = [];
+    if (v.videoWidth) bits.push(`${v.videoWidth}×${v.videoHeight}`);
+    const fps = (state.analysis && state.analysis.video && state.analysis.video.nominalFps) ||
+      (media.info && media.info.fps) || 0;
+    if (fps) bits.push(`${fps} fps`);
+    if (duration) bits.push(fmtTime(duration));
+    bits.push(media.kind === 'stream' ? (media.selectedQuality || 'Online') : 'Local file');
+    el.watchMeta.textContent = bits.join(' · ');
+
+    // The enhancement state, said as what is actually on screen.
+    const on = !!(state.params && state.params.enabled);
+    el.watchState.hidden = false;
+    el.watchState.className = 'source-card-state' + (on ? ' on' : '');
+    const badge = el.glCanvas.height && on
+      ? `${labelForHeight(v.videoHeight)} → ${labelForHeight(el.glCanvas.height)}`
+      : labelForHeight(v.videoHeight);
+    el.watchState.innerHTML = '';
+    const dot = document.createElement('span');
+    dot.className = 'dot-state' + (on ? ' busy' : '');
+    const label = document.createElement('span');
+    label.className = 'state-label';
+    label.textContent = on ? 'Enhancing' : 'Native playback';
+    // The resolution keeps its own casing: uppercasing it renders "360P".
+    const value = document.createElement('span');
+    value.className = 'state-value';
+    value.textContent = badge;
+    el.watchState.append(dot, label, value);
   }
 
   function scrubPositionFromEvent(e) {
@@ -965,6 +1155,11 @@
     el.enhanceToggle.addEventListener('click', () => {
       state.params.enabled = !state.params.enabled;
       state.engine && state.engine.setParams({ enabled: state.params.enabled });
+      // The preset grid must not keep claiming "Original" while enhancement is
+      // running, or the other way round: the toggle changes a parameter that
+      // the preset also owns, so the selection stops being that preset.
+      const preset = findPreset(state.presetId);
+      if (preset && !!preset.params.enabled !== state.params.enabled) markCustom();
       updateEnhanceToggle();
     });
 
@@ -1088,6 +1283,7 @@
   function setCompare(mode) {
     state.compare = mode;
     el.compareBtn.classList.toggle('active', !!mode);
+    el.compareBtn.setAttribute('aria-pressed', mode ? 'true' : 'false');
     el.compareLabels.hidden = !mode;
     el.splitHandle.hidden = !mode;
     if (state.engine) state.engine.setCompare(mode, state.splitX);
@@ -1152,51 +1348,97 @@
    * Stats overlay
    * ------------------------------------------------------------------ */
 
+  /**
+   * The diagnostics overlay.
+   *
+   * Twice a second, and only while it is actually on screen. The numbers
+   * underneath are collected continuously by playback-stats.js at one callback
+   * per presented frame; writing them into the DOM at that rate would make the
+   * measurement instrument the thing worth measuring.
+   */
   function bindStats() {
     let visible = false;
+    let timer = null;
+
     const render = () => {
       if (!visible || !state.engine) return;
       const s = state.engine.stats;
       const v = el.video;
       const pb = state.playback ? state.playback.snapshot() : null;
-      const rows = [
-        ['Path', state.presentation === 'native' ? 'native (no GPU work)' : 'enhanced'],
-        ['Source', v.videoWidth ? `${v.videoWidth}×${v.videoHeight}` : '—'],
-        // Compositor-counted, not callback-counted: see playback-stats.js.
-        ['Presented', pb ? `${pb.presentedFps} fps${pb.presentedBasis === 'callbacks' ? ' (est.)' : ''}` : '—'],
-        ['Dropped', pb ? `${pb.droppedFrames}/${pb.totalFrames} (${pb.droppedPercent}%)` : '—'],
-        ['Jitter', pb ? `${pb.jitterMs} ms` : '—'],
-        ['Buffer', pb ? `${pb.bufferedAheadSec}s` : '—']
-      ];
-      if (state.presentation === 'enhanced') {
-        rows.push(
-          ['Render', s.outputW ? `${s.outputW}×${s.outputH}` : '—'],
-          ['Frame cost', `${s.cpuMs} ms / ${s.frameBudgetMs} ms budget`],
-          ['Quality scale', `${Math.round(s.droppedScale * 100)}% (${s.policy})`]
-        );
-        if (s.skipped) rows.push(['Skipped', `${s.skipped} stale frame(s)`]);
-      }
-      rows.push(['GPU', String(s.gpu).slice(0, 34)]);
-      if (s.limited) rows.push(['Status', 'GPU limited — lower Playback quality']);
-      el.statsOverlay.innerHTML = rows
-        .map(([k, val]) => `<div class="row"><span>${k}</span><b>${val}</b></div>`)
-        .join('');
-    };
-    setInterval(render, 500);
 
-    el.statsBtn.addEventListener('click', () => {
-      visible = !visible;
+      const groups = [
+        ['Playback', [
+          ['Path', state.presentation === 'native' ? 'native — no GPU work' : 'enhanced'],
+          ['Source', v.videoWidth ? `${v.videoWidth}×${v.videoHeight}` : '—'],
+          // Compositor-counted, not callback-counted: see playback-stats.js.
+          ['Presented', pb ? `${pb.presentedFps} fps${pb.presentedBasis === 'callbacks' ? ' est.' : ''}` : '—'],
+          ['Dropped', pb ? `${pb.droppedFrames}/${pb.totalFrames} · ${pb.droppedPercent}%` : '—'],
+          ['Jitter', pb ? `${pb.jitterMs} ms` : '—'],
+          ['Buffer', pb ? `${pb.bufferedAheadSec}s` : '—']
+        ]]
+      ];
+
+      if (state.presentation === 'enhanced') {
+        const enhanced = [
+          ['Render', s.outputW ? `${s.outputW}×${s.outputH}` : '—'],
+          ['Frame cost', `${s.cpuMs} / ${s.frameBudgetMs} ms`],
+          ['Quality scale', `${Math.round(s.droppedScale * 100)}% · ${s.policy}`]
+        ];
+        if (s.skipped) enhanced.push(['Skipped', `${s.skipped} stale`]);
+        groups.push(['Enhancement', enhanced]);
+      }
+
+      groups.push(['Device', [['GPU', String(s.gpu).slice(0, 34)]]]);
+
+      const html = [];
+      for (const [heading, rows] of groups) {
+        html.push(`<div class="shead">${heading}</div>`);
+        for (const [key, value] of rows) {
+          html.push(`<div class="row"><span>${escapeHtml(key)}</span><b>${escapeHtml(value)}</b></div>`);
+        }
+      }
+      if (s.limited) {
+        html.push('<div class="row alert"><span>Status</span><b>GPU limited</b></div>');
+      }
+      el.statsOverlay.innerHTML = html.join('');
+    };
+
+    const setVisible = (next) => {
+      visible = next;
       el.statsOverlay.hidden = !visible;
       el.statsBtn.classList.toggle('active', visible);
-      api.settings.patch({ showStats: visible });
+      el.statsBtn.setAttribute('aria-pressed', visible ? 'true' : 'false');
+      // No timer at all while the overlay is closed. An always-on interval
+      // that computes a snapshot and throws it away is exactly the ambient
+      // cost this UI is supposed to not have.
+      if (visible && !timer) timer = setInterval(render, 500);
+      if (!visible && timer) { clearInterval(timer); timer = null; }
       render();
+    };
+
+    el.statsBtn.addEventListener('click', () => {
+      setVisible(!visible);
+      api.settings.patch({ showStats: visible });
+    });
+
+    // A hidden window has nothing to show; resume on return.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible' && timer) {
+        clearInterval(timer);
+        timer = null;
+      } else if (document.visibilityState === 'visible' && visible && !timer) {
+        timer = setInterval(render, 500);
+      }
     });
 
     // Restore the persisted preference once settings arrive.
     setTimeout(() => {
-      if (state.settings && state.settings.showStats) el.statsBtn.click();
+      if (state.settings && state.settings.showStats) setVisible(true);
     }, 60);
   }
+
+  const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
   /* ------------------------------------------------------------------ *
    * Create
@@ -1310,7 +1552,7 @@
     state.createAnalysis = (snapshot && snapshot.analysis) || null;
     state.autoResult = null;
     state.recipeState = 'custom';
-    el.autoState.textContent = snapshot ? 'Ready — press Suggest settings' : 'Choose a source first';
+    el.autoState.textContent = snapshot ? 'Ready' : 'No source';
     refreshCreateSource();
     syncGeometryUi();
     schedulePreview();
@@ -1357,13 +1599,251 @@
     const src = state.createSource;
     if (!src) {
       el.createSourceTitle.textContent = 'No source selected';
-      el.analysisGrid.innerHTML = '';
-      el.analysisNote.textContent =
+      el.createSourceSub.textContent =
         'Choose a video, paste a URL, or use whatever Watch is playing.';
+      // A neutral placeholder, not an empty box: the slot is part of the
+      // layout whether or not there is a source in it yet.
+      el.createThumb.dataset.thumbId = '';
+      el.createThumb.dataset.thumbState = '';
+      el.createThumb.innerHTML =
+        `<div class="thumb-fallback">${ICONS.mediaMark}</div>`;
+      el.analysisGrid.innerHTML = '';
+      el.analysisNote.textContent = '';
+      el.createKindTag.textContent = '';
+      updateRenderSummary();
       return;
     }
     el.createSourceTitle.textContent = src.title || src.source;
+    el.createSourceTitle.title = src.source;
+    el.createKindTag.textContent = src.kind === 'stream' ? 'Online' : 'Local';
+
+    // The identity, and therefore the picture, that this source carries
+    // everywhere else in the app.
+    const analysis = state.createAnalysis;
+    const duration = (analysis && analysis.derived && analysis.derived.durationSeconds) ||
+      (src.info && src.info.duration) || null;
+    thumbs.paint(el.createThumb, {
+      kind: src.kind,
+      source: src.source,
+      webpageUrl: src.webpageUrl,
+      thumbnail: src.thumbnail || null,
+      durationSeconds: duration
+    }, { duration });
+
+    const bits = [src.kind === 'stream' ? 'Online source' : 'Local file'];
+    if (analysis && analysis.derived) {
+      const d = analysis.derived;
+      if (d.displayWidth) bits.push(`${d.displayWidth}×${d.displayHeight}`);
+      if (analysis.video && analysis.video.nominalFps) bits.push(`${analysis.video.nominalFps} fps`);
+    }
+    if (duration) bits.push(fmtTime(duration));
+    el.createSourceSub.textContent = bits.join(' · ');
+
     renderAnalysis(state.createAnalysis);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Create as the starting workspace
+   *
+   * Create is where a session begins, so it carries the two things a starting
+   * page owes you: what this machine is currently doing, and the quickest way
+   * back to something you already had open. Both are readouts of state the app
+   * already holds — the job map, the engine status, the recents list. Nothing
+   * here polls, and nothing here is a number that only exists to fill a card.
+   *
+   * The intake stays aimed at Create. Choosing a recent sets the *Create*
+   * source and never touches the player, which is the same separation
+   * `setCreateSource` exists to enforce.
+   * ------------------------------------------------------------------ */
+
+  function refreshCreateHome() {
+    if (!el.createHomeStats) return;
+
+    const jobs = [...state.jobs.values()];
+    const active = jobs.filter(isActiveJob);
+    const done = jobs.filter((j) => j.status === 'completed').length;
+    const engines = ['realesrgan', 'rife'].filter((id) => engineState(id) === 'installed').length;
+
+    const cells = [
+      ['Queued', active.length ? String(active.length) : '—', active.length ? 'on' : '', 'queue'],
+      ['Rendered', done ? String(done) : '—', '', 'queue'],
+      ['Engines', `${engines}/2`, engines === 2 ? 'ok' : '', null],
+      ['Recents', lastRecents.length ? String(lastRecents.length) : '—', '', 'library']
+    ];
+
+    el.createHomeStats.innerHTML = '';
+    for (const [label, value, kind, target] of cells) {
+      const cell = document.createElement(target ? 'button' : 'div');
+      cell.className = 'intro-stat' + (target ? ' is-link' : '');
+      if (target) {
+        cell.type = 'button';
+        cell.title = `Open ${target === 'queue' ? 'the render queue' : 'the library'}`;
+        cell.addEventListener('click', () => setWorkspace(target));
+      }
+      const v = document.createElement('strong');
+      v.className = 'intro-stat-value' + (kind ? ` ${kind}` : '');
+      v.textContent = value;
+      const l = document.createElement('span');
+      l.textContent = label;
+      cell.append(v, l);
+      el.createHomeStats.appendChild(cell);
+    }
+
+    refreshCreateRecents();
+  }
+
+  function refreshCreateRecents() {
+    const host = el.createRecents;
+    if (!host) return;
+
+    el.createRecentsTag.textContent = lastRecents.length ? String(lastRecents.length) : '';
+
+    host.innerHTML = '';
+    if (!lastRecents.length) {
+      const note = document.createElement('p');
+      note.className = 'mini-empty';
+      note.textContent = 'Nothing opened yet. A video you play or render shows up here.';
+      host.appendChild(note);
+      return;
+    }
+
+    for (const item of lastRecents.slice(0, 5)) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'mini-recent';
+      row.title = `Set as the Create source — ${item.source}`;
+
+      const thumb = document.createElement('div');
+      thumb.className = 'thumb xs';
+      thumbs.paint(thumb, {
+        kind: item.kind,
+        source: item.source,
+        webpageUrl: item.kind === 'stream' ? item.source : null,
+        thumbnail: item.thumbnail || null,
+        durationSeconds: item.duration || null
+      }, { duration: item.duration || null });
+
+      const body = document.createElement('span');
+      body.className = 'mini-recent-body';
+      const title = document.createElement('span');
+      title.className = 'mini-recent-title';
+      title.textContent = item.title || item.source;
+      const sub = document.createElement('span');
+      sub.className = 'mini-recent-sub';
+      const bits = [item.kind === 'stream' ? 'Online' : 'Local'];
+      if (item.duration) bits.push(fmtTime(item.duration));
+      sub.textContent = bits.join(' · ');
+      body.append(title, sub);
+
+      row.append(thumb, body);
+      row.addEventListener('click', () => useRecentAsCreateSource(item));
+      host.appendChild(row);
+    }
+  }
+
+  /**
+   * A recent, aimed at Create.
+   *
+   * Both branches are the routes Create already uses: a local file is opened
+   * and probed exactly as the file picker does, and a URL goes through the
+   * same resolve-and-release path as the URL box — which is also what refuses
+   * a live stream. Neither touches the video element.
+   */
+  async function useRecentAsCreateSource(item) {
+    if (item.kind === 'stream') {
+      el.createUrlInput.value = item.source;
+      return createOpenUrl();
+    }
+    const opened = await api.media.open(item.source);
+    if (!opened.ok) return reportFailure(opened);
+    await setCreateSource(snapshotSource(opened, opened.analysis));
+    toast('Create source set. Watch is untouched.', 'ok', 3500);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Create's section summaries
+   *
+   * Every collapsed group states what it currently holds, so the form can be
+   * closed and still readable. Read from the same controls the recipe is built
+   * from, so a tag can never describe something the render will not do.
+   * ------------------------------------------------------------------ */
+
+  function refreshGroupTags() {
+    const aspect = currentAspect();
+    const size = resolveGeometryChoice(aspect, suggestedResolutionFor(aspect));
+    const platform = state.platforms[el.createPlatform.value];
+
+    const outBits = [];
+    if (platform && platform.id !== 'custom') outBits.push(platform.label);
+    if (size) outBits.push(`${size.width}×${size.height}`);
+    else outBits.push('Source size');
+    el.tagOutput.textContent = outBits.join(' · ');
+
+    el.tagFraming.textContent = aspect
+      ? `${aspect.id} · ${FRAMING_LABEL[el.createFraming.value] || el.createFraming.value}`
+      : 'Source shape';
+
+    const ai = el.createAi.value;
+    el.tagEnhancement.textContent = ai === 'off'
+      ? 'Off'
+      : `${ai === 'restore' ? 'Restore' : `${ai}×`} · ${capitalise(el.createAiQuality.value)}`;
+
+    const fps = el.createFps.value;
+    const interp = el.createInterp.value;
+    el.tagMotion.textContent = fps === 'source'
+      ? (interp === 'ai' ? 'Source rate · RIFE' : 'Source rate')
+      : `${fps} fps · ${INTERP_LABEL[interp]}`;
+
+    el.tagColor.textContent = el.createUseLook.checked ? 'Player look applied' : 'No grade';
+
+    el.tagAudio.textContent = !el.createAudio.checked
+      ? 'Dropped'
+      : (el.createLoudness.checked
+        ? (AUDIO_MASTER_LABEL[state.audioMaster] && state.audioMaster !== 'preserve'
+          ? AUDIO_MASTER_LABEL[state.audioMaster]
+          : 'Normalized')
+        : 'Preserve');
+
+    updateRenderSummary();
+  }
+
+  const FRAMING_LABEL = {
+    smart: 'Smart Reframe',
+    fill: 'Centre crop',
+    fit: 'Fit, blurred',
+    'fit-black': 'Fit, black'
+  };
+  const INTERP_LABEL = { off: 'Preserve', classical: 'Classical', ai: 'RIFE' };
+  const capitalise = (s) => String(s || '').charAt(0).toUpperCase() + String(s || '').slice(1);
+
+  /**
+   * The one-line account of what pressing render will produce. Built from the
+   * panel, not from a wish: an entry appears only when the corresponding
+   * control genuinely asks for it.
+   */
+  function updateRenderSummary() {
+    el.renderSummary.innerHTML = '';
+    if (!state.createSource) return;
+
+    const aspect = currentAspect();
+    const size = resolveGeometryChoice(aspect, suggestedResolutionFor(aspect));
+    const add = (text, accent) => { if (text) el.renderSummary.appendChild(chip(text, accent)); };
+
+    add(size ? `${size.width} × ${size.height}` : 'Source size');
+    add(el.createFps.value === 'source' ? 'Source rate' : `${el.createFps.value} fps`);
+    const platform = state.platforms[el.createPlatform.value];
+    if (platform && platform.codec) add(platform.codec.toUpperCase());
+    if (aspect) add(FRAMING_LABEL[el.createFraming.value] || el.createFraming.value);
+    if (el.createAi.value !== 'off') {
+      add(el.createAi.value === 'restore' ? 'Neural restore' : `Neural ${el.createAi.value}×`, true);
+    }
+    if (el.createInterp.value === 'ai') add('RIFE', true);
+    if (el.createAudio.checked && el.createLoudness.checked) {
+      add(AUDIO_MASTER_LABEL[state.audioMaster] && state.audioMaster !== 'preserve'
+        ? AUDIO_MASTER_LABEL[state.audioMaster] : 'Normalized');
+    } else if (!el.createAudio.checked) {
+      add('No audio');
+    }
   }
 
   function renderAnalysis(analysis) {
@@ -1457,6 +1937,8 @@
     state.engines = res.engines;
     renderEngineList();
     syncAiUi();
+    refreshConsoleEngines();
+    refreshQueueSide();
   }
 
   function engineReady(id) {
@@ -1473,7 +1955,13 @@
 
       const info = document.createElement('div');
       const name = document.createElement('strong');
-      name.textContent = ENGINE_LABEL[id] || engine.name;
+      const dot = document.createElement('span');
+      dot.className = 'dot-state ' + (
+        engine.status === 'ready' ? 'ok'
+          : engine.status === 'installing' ? 'busy'
+            : engine.status === 'broken' ? 'bad' : ''
+      );
+      name.append(dot, document.createTextNode(ENGINE_LABEL[id] || engine.name));
       const status = document.createElement('p');
       status.className = 'muted';
       status.id = `engineStatus_${id}`;
@@ -1566,9 +2054,13 @@
     if (!upscaleReady) missing.push('Real-ESRGAN');
     if (!rifeReady) missing.push('RIFE');
     el.aiEngineState.textContent = missing.length
-      ? `${missing.join(' and ')} not installed`
-      : 'Engines ready';
+      ? `${missing.join(' + ')} missing`
+      : 'Ready';
     el.aiEngineState.classList.toggle('ready', missing.length === 0);
+    el.aiEngineState.classList.toggle('warn', missing.length > 0);
+    el.aiEngineState.title = missing.length
+      ? `${missing.join(' and ')} are not installed.`
+      : 'Real-ESRGAN and RIFE are installed and usable.';
     el.installEnginesBtn.hidden = missing.length === 0;
 
     const usingAi = el.createAi.value !== 'off';
@@ -1578,7 +2070,7 @@
     el.createAiNote.hidden = !usingAi;
     if (usingAi) {
       el.createAiNote.textContent = describeAiChoice();
-      el.createAiQualityNote.textContent = describeAiQuality();
+      renderResolvedPlanNote();
     }
 
     const interpAi = el.createInterp.value === 'ai';
@@ -1605,6 +2097,65 @@
     }
 
     el.createModelDetail.textContent = describeInstalledModels();
+    refreshGroupTags();
+  }
+
+  /**
+   * The resolved plan, short by default.
+   *
+   * The full explanation is genuinely important - it is the difference between
+   * a 3.6 s frame and a 12.7 s one - but a four-line orange paragraph under a
+   * dropdown is a paragraph nobody reads. So the line states what will run,
+   * and "Why?" opens the reasoning. Both come from the same resolved plan.
+   */
+  function renderResolvedPlanNote() {
+    const node = el.createAiQualityNote;
+    const full = describeAiQuality();
+    const short = summarisePlan();
+    const wasExpanded = node.classList.contains('expanded');
+
+    node.innerHTML = '';
+    node.classList.toggle('expanded', wasExpanded);
+    const text = document.createElement('span');
+    text.textContent = wasExpanded ? full : short;
+    node.appendChild(text);
+
+    if (full !== short) {
+      const why = document.createElement('button');
+      why.className = 'why';
+      why.textContent = wasExpanded ? 'Less' : 'Why?';
+      why.addEventListener('click', () => {
+        node.classList.toggle('expanded');
+        renderResolvedPlanNote();
+      });
+      node.appendChild(why);
+    }
+  }
+
+  /**
+   * One line naming the path the engine actually resolved. Prefers the plan
+   * the main process returned; falls back to the local description only when
+   * no preview has resolved yet.
+   */
+  function summarisePlan() {
+    const resolved = state.resolvedPlan && state.resolvedPlan.neural;
+    if (state.resolvedPlan && !state.resolvedPlan.neural && el.createAi.value !== 'off') {
+      return 'Classical reconstruction · no neural inference';
+    }
+    if (resolved && resolved.reason) {
+      // The backend's reason is a sentence fragment; take its first clause so
+      // the row stays one line, with the rest behind "Why?".
+      const clause = String(resolved.reason).split(/[,;]| — /)[0].trim();
+      return clause.charAt(0).toUpperCase() + clause.slice(1);
+    }
+    const quality = el.createAiQuality.value;
+    const animation = el.createAiModel.value === 'animation';
+    const scale = el.createAi.value;
+    if (scale === 'restore') return 'Native-scale inference, then a high-quality downscale';
+    if (animation) return `Native ${scale}× inference`;
+    if (quality === 'fast') return 'Classical reconstruction · no neural inference';
+    if (quality === 'balanced') return 'Real-ESRGAN at reduced inference resolution';
+    return 'Full-size neural reconstruction';
   }
 
   /**
@@ -1690,6 +2241,77 @@
     return bits.join(' — ') || 'No AI models installed.';
   }
 
+  /**
+   * Semantic detection is optional and says so.
+   *
+   * The copy never implies Smart Reframe is broken without it - it is not -
+   * and never claims face tracking is running when the models are absent.
+   */
+  async function refreshSemanticStatus() {
+    const res = await api.semantic.status();
+    if (!res.ok) return;
+    const s = res.semantic;
+    state.semantic = s;
+    refreshConsoleEngines();
+    refreshQueueSide();
+    el.semanticStatus.textContent = s.detail;
+    el.semanticStatus.classList.toggle('ok', s.status === 'ready');
+    el.installSemanticBtn.hidden = s.status === 'ready' || s.status === 'installing';
+    el.removeSemanticBtn.hidden = s.status !== 'ready';
+    el.installSemanticBtn.textContent =
+      s.status === 'broken' && s.runtime.available ? 'Repair' : 'Install';
+    // A runtime that will not load cannot be fixed by downloading weights.
+    el.installSemanticBtn.disabled = !s.runtime.available;
+    setDot(el.semanticDot, s.status === 'ready' ? 'ok'
+      : s.status === 'installing' ? 'busy'
+        : s.status === 'broken' ? 'bad' : '');
+
+    // The model names belong in an advanced disclosure, not in the headline:
+    // "YuNet and NanoDet-Plus" is not what the reader came for.
+    if (el.semanticDetail) {
+      const models = (s.models || []).map((m) =>
+        `${m.label || m.id}${m.present ? '' : (m.truncated ? ' (incomplete)' : ' (not downloaded)')}`);
+      const runtime = s.runtime && s.runtime.available
+        ? 'ONNX Runtime loaded (CPU provider)'
+        : `ONNX Runtime unavailable${s.runtime && s.runtime.error ? ` — ${s.runtime.error}` : ''}`;
+      el.semanticDetail.textContent = models.length
+        ? `${runtime}. Models: ${models.join(', ')}.`
+        : `${runtime}.`;
+    }
+    refreshSemanticNote();
+  }
+
+  /** One status dot vocabulary across every dependency row. */
+  function setDot(node, kind) {
+    if (!node) return;
+    node.className = `dot-state${kind ? ` ${kind}` : ''}`;
+  }
+
+  function bindSemantic() {
+    el.installSemanticBtn.addEventListener('click', async () => {
+      el.installSemanticBtn.disabled = true;
+      const off = api.semantic.onProgress((p) => {
+        el.semanticStatus.textContent =
+          `Downloading ${p.label}… ${Math.round(p.fraction * 100)}%`;
+      });
+      const res = await api.semantic.install();
+      off();
+      el.installSemanticBtn.disabled = false;
+      if (res.ok) toast('Face and person detection installed.', 'ok');
+      else reportFailure(res, 'The detection models could not be installed.');
+      refreshSemanticStatus();
+    });
+
+    el.removeSemanticBtn.addEventListener('click', async () => {
+      const res = await api.semantic.remove();
+      if (res.ok) toast('Detection models removed. Smart Reframe will use motion and detail.', 'ok', 5000);
+      else reportFailure(res);
+      refreshSemanticStatus();
+    });
+
+    api.semantic.onStatus(() => refreshSemanticStatus());
+  }
+
   async function refreshRuntimeStatus() {
     const res = await api.runtime.status();
     if (!res.ok) return;
@@ -1697,12 +2319,31 @@
     if (!found.length) {
       el.runtimeStatus.textContent = 'None found. Some sites will not resolve without one.';
       el.installRuntimeBtn.hidden = false;
+      setDot(el.runtimeDot, 'warn');
       return;
     }
     const best = found[0];
     el.runtimeStatus.textContent =
       `Using ${best.runtime} ${best.version || ''} (${best.source})`.trim();
     el.installRuntimeBtn.hidden = best.source !== 'electron';
+    setDot(el.runtimeDot, 'ok');
+  }
+
+  async function refreshThumbCacheStatus() {
+    const res = await api.thumbnails.stats();
+    if (!res.ok || !res.cache) {
+      state.thumbCache = null;
+      el.thumbCacheStatus.textContent = 'Unavailable.';
+      return;
+    }
+    const { count, bytes } = res.cache;
+    // Kept so the console's storage line can be written from the answer this
+    // call already produced, rather than asking again on its own schedule.
+    state.thumbCache = { count, bytes };
+    el.thumbCacheStatus.textContent = count
+      ? `${count} thumbnail${count === 1 ? '' : 's'} · ${fmtBytes(bytes)}`
+      : 'Empty. Thumbnails are extracted the first time a source is shown.';
+    refreshConsoleEngines();
   }
 
   /* ------------------------------------------------------------------ *
@@ -1799,7 +2440,7 @@
       if (!state.createAnalysis) return;
     }
     el.autoBuildBtn.disabled = true;
-    el.autoState.textContent = 'Thinking…';
+    el.autoState.textContent = 'Working';
 
     const res = await api.auto.build({
       analysis: state.createAnalysis,
@@ -1810,7 +2451,7 @@
     });
     el.autoBuildBtn.disabled = false;
     if (!res.ok) {
-      el.autoState.textContent = 'Auto failed';
+      el.autoState.textContent = 'Failed';
       return reportFailure(res, 'Auto could not build a recipe.');
     }
 
@@ -1820,7 +2461,7 @@
     renderAutoExplanation(res);
     // The state chip says whether these are still Auto's settings, not what
     // they cost - the cost preview owns that, from the resolved plan.
-    el.autoState.textContent = 'Auto settings applied';
+    el.autoState.textContent = 'Applied';
     el.autoState.classList.add('ready');
   }
 
@@ -1930,7 +2571,7 @@
     if (state.recipeState === 'auto') {
       state.recipeState = 'modified';
       if (!el.autoState.textContent.includes('edited')) {
-        el.autoState.textContent += ' · edited';
+        el.autoState.textContent = 'Applied · edited';
       }
     }
   }
@@ -2130,6 +2771,27 @@
     const reshapes = !!aspect;
     el.createFramingRow.hidden = !reshapes;
     el.createFramingHelp.hidden = !reshapes;
+    refreshSemanticNote();
+    refreshGroupTags();
+  }
+
+  /**
+   * What Smart Reframe will actually track on this machine.
+   *
+   * Never claims face tracking when the models are absent: without them the
+   * tracker is motion and detail saliency, which is a different and more
+   * modest thing, and the note says so.
+   */
+  function refreshSemanticNote() {
+    const node = el.createSemanticNote;
+    if (!node) return;
+    const relevant = !el.createFramingRow.hidden && el.createFraming.value === 'smart';
+    node.hidden = !relevant;
+    if (!relevant) return;
+    const ready = state.semantic && state.semantic.status === 'ready';
+    node.textContent = ready
+      ? 'Face and person detection is installed, so a stationary subject is not lost to a busy background. The Queue reports which signal actually decided each sample.'
+      : 'Face and person detection is not installed, so tracking will use motion and detail saliency alone. Install it under Settings → Models.';
   }
 
   /** The concrete output size the panel currently describes, or null. */
@@ -2408,22 +3070,132 @@
     interrupted: 'interrupted'
   };
 
+  const ACTIVE_STATUSES = ['queued', 'ready', 'analysing', 'running', 'paused', 'cancelling'];
+  const isActiveJob = (job) => ACTIVE_STATUSES.includes(job.status);
+
+  /**
+   * The Queue is capped rather than unbounded.
+   *
+   * The job store keeps history, and a list that builds a card plus a details
+   * block for every render ever run would get slower every week. Active jobs
+   * are always shown; finished ones are windowed, with an explicit control to
+   * show more. No virtualisation library, no scroll maths - just a count.
+   */
+  const JOB_PAGE = 20;
+  let jobsShown = JOB_PAGE;
+
   function renderJobs() {
     const jobs = [...state.jobs.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     el.jobList.innerHTML = '';
+
+    const active = jobs.filter(isActiveJob);
+    updateQueueBadge(active.length);
+    updateJobStrip(active);
+    refreshUtilityStrip();
+    refreshQueueSide();
+    refreshStatusBar();
+    if (state.workspace === 'create') refreshCreateHome();
+
     if (!jobs.length) {
-      el.jobList.innerHTML = '<div class="empty-note">No renders yet. Queue one from the Create tab.</div>';
+      el.jobList.innerHTML =
+        '<div class="empty-note"><strong>No active jobs</strong>' +
+        'Renders you queue from Create appear here, and survive a restart.</div>';
+      el.queueSummary.textContent = '';
       return;
     }
 
-    for (const job of jobs) {
-      el.jobList.appendChild(renderJobCard(job));
+    const visible = jobs.slice(0, Math.max(jobsShown, active.length));
+    for (const job of visible) el.jobList.appendChild(renderJobCard(job));
+
+    const hidden = jobs.length - visible.length;
+    if (hidden > 0) {
+      const more = document.createElement('button');
+      more.className = 'btn btn-ghost full';
+      more.textContent = `Show ${Math.min(hidden, JOB_PAGE)} older render${hidden === 1 ? '' : 's'}`;
+      more.addEventListener('click', () => { jobsShown += JOB_PAGE; renderJobs(); });
+      el.jobList.appendChild(more);
     }
+
+    const done = jobs.filter((j) => j.status === 'completed').length;
+    el.queueSummary.textContent =
+      `${jobs.length} total · ${active.length} active · ${done} complete`;
   }
 
+  function updateQueueBadge(count) {
+    el.queueCount.hidden = count === 0;
+    el.queueCount.textContent = String(count);
+  }
+
+  /**
+   * The background render strip in the top bar.
+   *
+   * Small on purpose: a render can take an hour, and a status readout that
+   * occupies a fifth of the window for that hour is a worse trade than a chip
+   * you can click. Written in place rather than rebuilt, because a running job
+   * emits updates continuously.
+   */
+  function updateJobStrip(active) {
+    const job = active.find((j) => j.status === 'running') || active[0];
+    if (!job) { el.jobStrip.hidden = true; return; }
+
+    el.jobStrip.hidden = false;
+    if (!el.jobStrip.childElementCount) {
+      el.jobStrip.innerHTML =
+        '<span class="js-name"></span><span class="js-stage"></span>' +
+        '<span class="js-bar"><span></span></span><span class="js-num"></span>';
+    }
+    const pct = Math.round((job.progress || 0) * 100);
+    const set = (selector, text) => {
+      const node = el.jobStrip.querySelector(selector);
+      if (node.textContent !== text) node.textContent = text;
+    };
+    set('.js-name', job.title || 'Render');
+    set('.js-stage', (job.stage || STATUS_LABEL[job.status] || '').toUpperCase());
+    el.jobStrip.querySelector('.js-bar span').style.width = `${pct}%`;
+
+    const bits = [`${pct}%`];
+    const rate = job.neuralRate;
+    if (rate && !rate.warming && rate.framesPerSecond > 0) {
+      bits.push(`${rate.framesPerSecond.toFixed(2)} fps`);
+    } else if (job.speed) {
+      bits.push(`${job.speed.toFixed(2)}×`);
+    }
+    if (job.eta) bits.push(`~${fmtTime(job.eta)}`);
+    set('.js-num', bits.join(' · '));
+    el.jobStrip.title = `${job.title} — ${STATUS_LABEL[job.status] || job.status}. Open the render queue.`;
+  }
+
+  /**
+   * A job card.
+   *
+   * The row answers "what is this, how far along, how fast, and what will come
+   * out" at a glance; everything a person only wants when something went wrong
+   * - the stage path, the model, the GPU, the tile, the chunk plan, the full
+   * Smart Reframe accounting, the verification failures - lives behind one
+   * disclosure. Neither half invents anything: a field the backend did not
+   * report is simply absent.
+   */
   function renderJobCard(job) {
     const node = document.createElement('div');
     node.className = 'job';
+    if (isActiveJob(job)) node.classList.add('is-active');
+    if (job.status === 'completed') node.classList.add('done');
+    if (job.status === 'failed') node.classList.add('bad');
+
+    const main = document.createElement('div');
+    main.className = 'job-main';
+
+    // The same thumbnail this source has in Create and the Library.
+    const thumb = document.createElement('div');
+    thumb.className = 'thumb md';
+    thumbs.paint(thumb, {
+      kind: job.source.type === 'remote' ? 'stream' : 'local',
+      source: job.source.path || job.source.webpageUrl,
+      webpageUrl: job.source.webpageUrl
+    }, { duration: job.totalDuration || null });
+
+    const body = document.createElement('div');
+    body.className = 'job-body';
 
     const head = document.createElement('div');
     head.className = 'job-head';
@@ -2431,10 +3203,12 @@
     title.className = 'job-title';
     title.textContent = job.title;
     title.title = job.output ? job.output.path : '';
-    const status = document.createElement('div');
-    status.className = `job-status ${job.status}`;
-    status.textContent = STATUS_LABEL[job.status] || job.status;
-    head.append(title, status);
+    head.append(title);
+
+    // Progress and rate form their own column, so a row resolves left to right
+    // as identity → what it makes → how far along → how fast → state.
+    const track = document.createElement('div');
+    track.className = 'job-track';
 
     const bar = document.createElement('div');
     bar.className = 'job-bar';
@@ -2448,6 +3222,7 @@
     const stageLabel = job.stage ? `${job.stage.toLowerCase()} · ` : '';
     left.textContent = `${stageLabel}${Math.round((job.progress || 0) * 100)}%`;
     const right = document.createElement('span');
+    right.className = 'job-meta-right';
     if (job.status === 'running') {
       // A neural job has no ffmpeg `speed`; it has a measured frame rate. Show
       // whichever the job actually produced, and show nothing at all while the
@@ -2466,92 +3241,64 @@
       right.textContent = parts.join(' · ');
     } else if (job.status === 'completed' && job.output && job.output.sizeBytes) {
       right.textContent = fmtBytes(job.output.sizeBytes);
-    } else {
-      right.textContent = '';
     }
     meta.append(left, right);
-    node.append(head, bar, meta);
+    track.append(bar, meta);
+    body.append(head);
 
-    // What this job costs, from the plan that actually ran.
+    // What is going to come out, and what it will cost to get there.
+    const spec = document.createElement('div');
+    spec.className = 'job-spec';
+    for (const text of describeJobOutput(job)) spec.appendChild(chip(text));
     if (job.cost && !['completed', 'cancelled'].includes(job.status)) {
-      const cost = document.createElement('div');
-      cost.className = `job-cost ${job.cost.class}`;
       const badge = document.createElement('span');
-      badge.className = 'cost-class ' + job.cost.class;
+      badge.className = `cost-class ${job.cost.class}`;
       badge.textContent = job.cost.label;
-      const detail = document.createElement('span');
-      detail.textContent = job.cost.reasons.join(' · ');
-      cost.append(badge, detail);
-      node.appendChild(cost);
+      badge.title = job.cost.reasons.join(' · ');
+      spec.appendChild(badge);
     }
+    if (spec.childElementCount) body.appendChild(spec);
 
-    if (job.plan && job.plan.description) {
-      const plan = document.createElement('div');
-      plan.className = 'job-plan';
-      plan.textContent = job.plan.chunked
-        ? `${job.plan.description} · ${job.plan.chunkCount} chunks`
-        : job.plan.description;
-      node.appendChild(plan);
-    }
-
-    // What Smart Reframe actually did, named by the backend that did it. The
-    // panel never says "AI framing" when what ran was saliency tracking.
-    // One reconciled account of what the tracker did. Every number here comes
-    // from the same summary, so the card can no longer report a success metric
-    // beside a failure warning.
+    // Smart Reframe, in one line. The backend name comes from counted
+    // contributions, so a run that fell back to saliency says saliency however
+    // much detection is installed, and a failed run names no backend at all.
     if (job.reframe) {
       const rf = document.createElement('div');
       rf.className = `job-reframe ${job.reframe.outcome || ''}`;
-      const title = document.createElement('div');
-      title.className = 'job-reframe-head';
-      title.textContent = `Smart Reframe · ${job.reframe.backendLabel}`;
-      const line = document.createElement('div');
-      // A job persisted by an earlier build has the old counters and no
-      // headline. Describe it from what it does have rather than printing
-      // "undefined" at someone.
-      line.textContent = job.reframe.headline ||
-        `Tracked ${job.reframe.tracked ?? '—'} of ${job.reframe.samples ?? '—'} samples`;
-      rf.append(title, line);
-      if (job.reframe.detail && job.reframe.detail.length) {
-        const detail = document.createElement('div');
-        detail.className = 'job-reframe-detail';
-        detail.textContent = job.reframe.detail.join(' · ');
-        rf.appendChild(detail);
+      const mark = document.createElement('span');
+      mark.className = 'rf-mark';
+      const label = document.createElement('span');
+      label.textContent = job.reframe.outcome === 'centred'
+        ? 'Smart Reframe · centre framing used'
+        : `Smart Reframe · ${job.reframe.backendLabel}`;
+      rf.append(mark, label);
+      if (job.reframe.outcome !== 'centred' &&
+          Number.isFinite(job.reframe.tracked) && Number.isFinite(job.reframe.samples)) {
+        const count = document.createElement('span');
+        count.className = 'rf-count';
+        // "Tracked N of M" rather than a bare ratio: the row has to say what
+        // the numbers count, and verify-switch asserts this exact shape.
+        count.textContent = `Tracked ${job.reframe.tracked} of ${job.reframe.samples}`;
+        rf.appendChild(count);
       }
-      node.appendChild(rf);
+      body.appendChild(rf);
     }
 
-    for (const w of job.warnings || []) {
-      const warn = document.createElement('div');
-      warn.className = 'job-warning';
-      warn.textContent = w;
-      node.appendChild(warn);
-    }
-
+    // Only genuinely actionable text stays on the row.
     if (job.error) {
       const err = document.createElement('div');
-      err.className = 'job-error';
+      err.className = 'job-note job-error';
       err.textContent = job.error.suggestedAction
         ? `${job.error.message} ${job.error.suggestedAction}`
         : job.error.message;
-      if (job.error.technicalDetails) err.title = job.error.technicalDetails;
-      node.appendChild(err);
-    }
-
-    if (job.verification && !job.verification.ok) {
-      for (const failure of job.verification.failures) {
-        const v = document.createElement('div');
-        v.className = 'job-error';
-        v.textContent = failure;
-        node.appendChild(v);
-      }
+      body.appendChild(err);
     }
 
     const actions = document.createElement('div');
     actions.className = 'job-actions';
-    const button = (label, fn) => {
+    const button = (label, fn, kind) => {
       const b = document.createElement('button');
-      b.className = 'btn btn-ghost';
+      b.className = `btn ${kind || 'btn-ghost'}`;
       b.textContent = label;
       b.addEventListener('click', async () => {
         b.disabled = true;
@@ -2562,6 +3309,8 @@
       actions.appendChild(b);
     };
 
+    // Only actions that are valid right now. A disabled row of every possible
+    // verb is clutter that tells the user nothing.
     if (['queued', 'ready', 'analysing', 'running', 'cancelling'].includes(job.status)) {
       if (job.status === 'running' && job.pauseSupported) button('Pause', () => api.jobs.pause(job.id));
       if (job.status !== 'cancelling') button('Cancel', () => api.jobs.cancel(job.id));
@@ -2575,61 +3324,956 @@
       button('Remove', () => api.jobs.remove(job.id));
     }
     if (job.status === 'completed' && job.output) {
-      button('Play', () => api.system.openPath(job.output.path));
+      button('Play', () => api.system.openPath(job.output.path), 'btn-secondary');
       button('Show in folder', () => api.system.reveal(job.output.path));
       button('Remove', () => api.jobs.remove(job.id));
     }
-    if (actions.children.length) node.appendChild(actions);
+
+    // Status and actions share the right-hand column.
+    const side = document.createElement('div');
+    side.className = 'job-side';
+    const status = document.createElement('div');
+    status.className = `job-status ${job.status}`;
+    status.textContent = STATUS_LABEL[job.status] || job.status;
+    side.appendChild(status);
+    if (actions.children.length) side.appendChild(actions);
+
+    main.append(thumb, body, track, side);
+    node.appendChild(main);
+
+    const details = buildJobDetails(job);
+    if (details) node.appendChild(details);
 
     return node;
+  }
+
+  /** The chips on a job row: what the render is actually producing. */
+  function describeJobOutput(job) {
+    const bits = [];
+    const r = job.recipe;
+    if (!r) return bits;
+    const target = r.reconstruction && r.reconstruction.targetResolution;
+    if (target && target.width && target.height) bits.push(`${target.width}×${target.height}`);
+    else if (target && target.mode === 'source') bits.push('Source size');
+    if (r.output && r.output.fps) bits.push(`${r.output.fps} fps`);
+    if (r.output && r.output.codec) bits.push(String(r.output.codec).toUpperCase());
+    if (r.reconstruction && r.reconstruction.mode === 'neural') {
+      bits.push(r.reconstruction.aiMode === 'restore'
+        ? 'Neural restore'
+        : `Neural ${r.reconstruction.aiScale}×`);
+    }
+    if (r.motion && r.motion.interpolation === 'ai') bits.push('RIFE');
+    if (r.audio && r.audio.master && r.audio.master !== 'preserve') {
+      bits.push(AUDIO_MASTER_LABEL[r.audio.master] || r.audio.master);
+    }
+    return bits;
+  }
+
+  const AUDIO_MASTER_LABEL = {
+    preserve: 'Preserve',
+    normalize: 'Normalize',
+    creator: 'Creator Master',
+    dialogue: 'Dialogue Focus'
+  };
+
+  /**
+   * Everything a person only needs when they are investigating. Built as a
+   * definition list so the labels align without a table, and skipped entirely
+   * when there is nothing worth disclosing.
+   */
+  function buildJobDetails(job) {
+    const rows = [];
+    const add = (key, value, plain) => {
+      if (value === null || value === undefined || value === '') return;
+      rows.push([key, String(value), plain]);
+    };
+
+    if (job.plan && job.plan.description) {
+      add('Plan', job.plan.chunked
+        ? `${job.plan.description} · ${job.plan.chunkCount} chunks`
+        : job.plan.description, true);
+    }
+    // Stage records are objects on a real job, so joining the array directly
+    // printed "[object Object] → [object Object]" for every render that was
+    // not the harness's synthetic one.
+    const chain = stageChain(job);
+    if (chain.length) {
+      add('Stages', chain.map((s) => s.name.toUpperCase()).join(' → '), true);
+    }
+    if (job.cost) add('Cost', `${job.cost.label} — ${job.cost.reasons.join(' · ')}`, true);
+
+    const metrics = job.aiMetrics;
+    if (metrics) {
+      add('Model', metrics.model || metrics.upscaleModel);
+      add('GPU', metrics.gpu !== undefined && metrics.gpu !== null ? String(metrics.gpu) : null);
+      add('Tile', metrics.tileSize);
+    }
+    if (job.checkpoint && job.checkpoint.chunkIndex !== undefined) {
+      add('Checkpoint', `chunk ${job.checkpoint.chunkIndex}`);
+    }
+    if (job.output) {
+      add('Output', job.output.path);
+      if (job.output.sizeBytes) add('Size', fmtBytes(job.output.sizeBytes));
+    }
+
+    // The reconciled Smart Reframe account: tracked + held + centred always
+    // equals the sample count, and the confidence is over the samples used.
+    if (job.reframe) {
+      add('Reframe', job.reframe.headline, true);
+      if (job.reframe.detail && job.reframe.detail.length) {
+        add('Tracking', job.reframe.detail.join(' · '), true);
+      }
+    }
+
+    for (const w of job.warnings || []) rows.push(['Warning', w, true, 'warn']);
+    if (job.error && job.error.technicalDetails) add('Detail', job.error.technicalDetails);
+    if (job.verification && !job.verification.ok) {
+      for (const failure of job.verification.failures) rows.push(['Verification', failure, true, 'bad']);
+    }
+
+    if (!rows.length) return null;
+
+    const details = document.createElement('details');
+    details.className = 'job-details';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Technical detail';
+    const body = document.createElement('dl');
+    body.className = 'job-detail-body';
+    for (const [key, value, plain, kind] of rows) {
+      const dt = document.createElement('dt');
+      dt.textContent = key;
+      const dd = document.createElement('dd');
+      dd.textContent = value;
+      dd.className = [plain ? 'plain' : '', kind ? `dd-${kind}` : ''].filter(Boolean).join(' ');
+      body.append(dt, dd);
+    }
+    details.append(summary, body);
+    return details;
   }
 
   /* ------------------------------------------------------------------ *
    * Library
    * ------------------------------------------------------------------ */
 
+  /**
+   * Recent media.
+   *
+   * Rendered as rows, and restyled into a card grid by the Library workspace.
+   * The thumbnail is the one this source already has everywhere else - the
+   * cache is asked once per identity, not once per card, so re-rendering the
+   * list is free.
+   */
+  let lastRecents = [];
+
   function renderRecents(recents) {
+    lastRecents = recents || [];
     el.recentList.innerHTML = '';
-    if (!recents || !recents.length) {
-      el.recentList.innerHTML = '<div class="empty-note">Nothing here yet. Videos you play will show up for one-click reopening.</div>';
+    refreshLibrarySummary();
+    // Create's intake reads the same list, so it can never fall behind it.
+    if (state.workspace === 'create') refreshCreateHome();
+
+    if (!lastRecents.length) {
+      el.recentList.innerHTML =
+        '<div class="empty-note"><strong>No recent media</strong>' +
+        'Videos you play appear here for one-click reopening.</div>';
       return;
     }
-    for (const item of recents) {
+
+    for (const item of lastRecents) {
       const row = document.createElement('div');
       row.className = 'recent';
+      row.tabIndex = 0;
+      row.setAttribute('role', 'button');
+      // Drives the corner kind marker on a Library card.
+      row.dataset.kind = item.kind || 'local';
 
-      const icon = document.createElement('div');
-      icon.className = 'recent-icon';
-      icon.innerHTML = item.kind === 'stream' ? ICONS.link : ICONS.file;
+      const thumb = document.createElement('div');
+      thumb.className = 'thumb sm';
+      thumbs.paint(thumb, {
+        kind: item.kind,
+        source: item.source,
+        webpageUrl: item.kind === 'stream' ? item.source : null,
+        thumbnail: item.thumbnail || null,
+        durationSeconds: item.duration || null
+      }, { duration: item.duration || null });
 
       const meta = document.createElement('div');
       meta.className = 'recent-meta';
       const t = document.createElement('div');
       t.className = 'recent-title';
       t.textContent = item.title || item.source;
+      t.title = item.source;
       const s = document.createElement('div');
       s.className = 'recent-sub';
-      s.textContent = item.kind === 'stream' ? 'Online stream' : item.source;
+      const bits = [item.kind === 'stream' ? 'Online' : 'Local file'];
+      if (item.duration) bits.push(fmtTime(item.duration));
+      if (item.at) bits.push(relativeTime(item.at));
+      s.textContent = bits.join(' · ');
       meta.append(t, s);
 
       const del = document.createElement('button');
       del.className = 'recent-del';
       del.textContent = '✕';
-      del.title = 'Remove';
+      del.title = 'Remove from recents';
+      del.setAttribute('aria-label', 'Remove from recents');
       del.addEventListener('click', async (e) => {
         e.stopPropagation();
         const r = await api.recents.remove(item.source);
         if (r.ok) renderRecents(r.recents);
       });
 
-      row.addEventListener('click', () => {
+      const open = () => {
         if (item.kind === 'stream') openUrl(item.source);
         else openLocalFile(item.source);
+        setWorkspace('presets');
+      };
+      row.addEventListener('click', open);
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
       });
 
-      row.append(icon, meta, del);
+      row.append(thumb, meta, del);
       el.recentList.appendChild(row);
     }
+  }
+
+  function refreshLibrarySummary() {
+    if (!el.librarySummary) return;
+    if (!lastRecents.length) { el.librarySummary.textContent = ''; return; }
+    const online = lastRecents.filter((r) => r.kind === 'stream').length;
+    el.librarySummary.textContent =
+      `${lastRecents.length} item${lastRecents.length === 1 ? '' : 's'}` +
+      (online ? ` · ${online} online` : '');
+  }
+
+  /** Coarse on purpose: nobody needs "4 minutes and 12 seconds ago". */
+  function relativeTime(at) {
+    const seconds = Math.max(0, (Date.now() - at) / 1000);
+    if (seconds < 90) return 'just now';
+    if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+    if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+    const days = Math.round(seconds / 86400);
+    return days === 1 ? 'yesterday' : `${days}d ago`;
+  }
+
+  /* ================================================================== *
+   * The workstation surfaces
+   *
+   * The source column, the process strip under the picture, the operations
+   * console and the status bar. Between them they are the difference between
+   * a player with a settings panel and a workstation, and none of them owns
+   * any state: every value below is read from `state`, the media element, the
+   * engine's own stats or the telemetry controller's last sample.
+   *
+   * They are written on real events - a source change, an enhancement toggle,
+   * a job update - plus the existing three-second housekeeping tick. Nothing
+   * here starts a timer, subscribes to anything, or asks the main process for
+   * a value it was not already going to receive.
+   * ================================================================== */
+
+  /** A key/value row for the source column's aligned spec tables. */
+  function specRow(host, key, value, kind) {
+    if (value === null || value === undefined || value === '') return;
+    const k = document.createElement('span');
+    k.className = 'sk';
+    k.textContent = key;
+    const v = document.createElement('span');
+    v.className = 'sv' + (kind ? ` ${kind}` : '');
+    v.textContent = value;
+    v.title = value;
+    host.append(k, v);
+  }
+
+  /** The descriptor a thumbnail request needs, from a player descriptor. */
+  function thumbRequest(media, duration) {
+    return {
+      kind: media.kind,
+      source: media.source,
+      webpageUrl: media.kind === 'stream' ? media.source : null,
+      thumbnail: media.thumbnail || null,
+      durationSeconds: duration
+    };
+  }
+
+  /** The look currently on the picture, named the way the user chose it. */
+  function currentLookName() {
+    if (state.presetId === '__custom') return 'Custom';
+    const preset = findPreset(state.presetId);
+    return preset ? preset.name : 'Custom';
+  }
+
+  /** How many parameters have been moved off the look they came from. */
+  function modifiedParamCount() {
+    let n = 0;
+    for (const [key, ref] of sliderRefs) {
+      void key;
+      if (ref.ctrl.classList.contains('modified')) n++;
+    }
+    return n;
+  }
+
+  /* ---- Watch's source details ----------------------------------------
+   *
+   * The probe report and the resolved processing summary, as they were in the
+   * Adjust source column. The identity half of that column — poster, title,
+   * kind — is gone rather than moved: Watch's own source card already states
+   * all three, and two readouts of one fact are two things to keep in step.
+   */
+
+  function refreshSourceDetails() {
+    const specs = el.sourceSpecs;
+    if (!specs) return;
+    if (state.workspace !== 'presets') return;
+
+    const media = state.media;
+    const analysis = state.analysis;
+    const v = el.video;
+    specs.innerHTML = '';
+
+    if (!media) {
+      specRow(specs, 'Status', 'no source', 'muted');
+      return;
+    }
+
+    const duration = Number.isFinite(v.duration)
+      ? v.duration
+      : (media.info && media.info.duration) || null;
+
+    // Only fields the probe or the media element actually reported. A source
+    // Visionance has not analysed simply has fewer rows.
+    const vid = (analysis && analysis.video) || {};
+    const derived = (analysis && analysis.derived) || {};
+    const colour = (analysis && analysis.color) || {};
+    const container = (analysis && analysis.container) || {};
+    const audio = analysis && analysis.audio;
+
+    specRow(specs, 'Decoded', v.videoWidth ? `${v.videoWidth}×${v.videoHeight}` : null, 'strong');
+    if (derived.displayWidth && derived.displayWidth !== v.videoWidth) {
+      specRow(specs, 'Container', `${derived.displayWidth}×${derived.displayHeight}`);
+    }
+    const fps = vid.nominalFps || (media.info && media.info.fps) || null;
+    specRow(specs, 'Frame rate', fps ? `${fps} fps` : null, 'strong');
+    specRow(specs, 'Duration', duration ? fmtTime(duration) : null);
+    specRow(specs, 'Codec', [vid.codec, vid.profile].filter(Boolean).join(' ') || null);
+    specRow(specs, 'Pixel format', vid.pixelFormat || null);
+    specRow(specs, 'Bit depth', vid.bitDepth ? `${vid.bitDepth}-bit` : null);
+    if (colour.isHDR) specRow(specs, 'Colour', `HDR ${colour.hdrFormat || colour.transfer || ''}`.trim(), 'accent');
+    else if (colour.transfer) specRow(specs, 'Colour', colour.transfer);
+    specRow(specs, 'Orientation', derived.orientation
+      ? `${derived.orientation} ${derived.aspectRatioLabel || ''}`.trim()
+      : null);
+    specRow(specs, 'Bitrate', container.bitrate ? `${Math.round(container.bitrate / 1000)} kbps` : null);
+    specRow(specs, 'Size', container.size ? fmtBytes(container.size) : null);
+    if (audio) specRow(specs, 'Audio', `${audio.codec} ${audio.channels || '?'}ch`);
+
+    if (!analysis) {
+      const note = document.createElement('p');
+      note.className = 'sfoot';
+      note.textContent = media.kind === 'stream'
+        ? 'Online sources are probed when a render starts; the player reports what it decoded.'
+        : 'Not probed yet.';
+      specs.appendChild(note);
+    }
+
+    // The Adjust column also carried a processing summary here — look, path,
+    // render size, quality, frame cost, presented rate. Every one of those is
+    // in the process strip directly under the picture, which Watch always
+    // shows, so repeating them inside a disclosure would be a second copy to
+    // keep in step with no second reader.
+  }
+
+  /* ---- Source / process strip under the picture --------------------- */
+
+  /**
+   * The strip's cells are built once and then written in place.
+   *
+   * Rebuilding them would re-create the thumbnail element on every update, and
+   * a fresh element means a fresh placeholder — so a slider drag would make the
+   * poster under the picture flicker several times a second.
+   */
+  function psCell(host, opts = {}) {
+    let lines = host.querySelector('.ps-lines');
+    if (!lines) {
+      host.innerHTML = '';
+      if (opts.thumb) {
+        const thumb = document.createElement('div');
+        thumb.className = 'thumb sm';
+        host.appendChild(thumb);
+      }
+      lines = document.createElement('div');
+      lines.className = 'ps-lines';
+      const a = document.createElement('div');
+      a.className = 'ps-primary';
+      const b = document.createElement('div');
+      b.className = 'ps-secondary';
+      lines.append(a, b);
+      host.appendChild(lines);
+    }
+    return {
+      thumb: host.querySelector('.thumb'),
+      set(primary, secondary) {
+        const a = lines.children[0];
+        const b = lines.children[1];
+        if (a.textContent !== primary) { a.textContent = primary; a.title = primary; }
+        if (b.textContent !== secondary) b.textContent = secondary;
+      }
+    };
+  }
+
+  function setTag(node, text, kind) {
+    node.textContent = text;
+    node.className = 'ps-tag' + (kind ? ` ${kind}` : '');
+  }
+
+  function refreshProcessStrip() {
+    if (!el.processStrip || el.processStrip.hidden) return;
+
+    const media = state.media;
+    const v = el.video;
+    const on = !!(state.params && state.params.enabled);
+
+    /* SOURCE */
+    const source = psCell(el.utilitySource, { thumb: true });
+    if (!media) {
+      setTag(el.utilitySourceTag, '');
+      source.set('Nothing loaded', 'open a file or paste a link in Watch');
+    } else {
+      const duration = Number.isFinite(v.duration)
+        ? v.duration
+        : (media.info && media.info.duration) || null;
+      setTag(el.utilitySourceTag, media.kind === 'stream' ? 'Online' : 'Local');
+      thumbs.paint(source.thumb, thumbRequest(media, duration), { duration });
+
+      const bits = [];
+      if (v.videoWidth) bits.push(`${v.videoWidth}×${v.videoHeight}`);
+      const fps = (state.analysis && state.analysis.video && state.analysis.video.nominalFps) ||
+        (media.info && media.info.fps) || 0;
+      if (fps) bits.push(`${fps} fps`);
+      if (duration) bits.push(fmtTime(duration));
+      source.set(media.title || media.source, bits.join(' · ') || '—');
+    }
+
+    /* LOOK */
+    const changed = modifiedParamCount();
+    setTag(el.psLookTag, changed ? `${changed} changed` : '', changed ? 'on' : '');
+    psCell(el.psLook).set(currentLookName(),
+      changed ? 'edited from the preset' : 'at preset values');
+
+    /* ENHANCEMENT */
+    setTag(el.psEnhanceTag, on ? 'On' : 'Off', on ? 'on' : '');
+    const enhance = psCell(el.psEnhance);
+    if (!media) {
+      enhance.set('—', 'nothing to enhance');
+    } else if (on && el.glCanvas.width) {
+      const scale = v.videoWidth ? Math.round((el.glCanvas.width / v.videoWidth) * 100) : null;
+      enhance.set(`${labelForHeight(v.videoHeight)} → ${labelForHeight(el.glCanvas.height)}`,
+        `${el.glCanvas.width}×${el.glCanvas.height}${scale ? ` · ${scale}%` : ''}`);
+    } else {
+      enhance.set(on ? 'Starting…' : 'Native playback',
+        on ? 'waiting for the first rendered frame'
+          : 'decoded frames go straight to the compositor');
+    }
+
+    /* REALTIME ENGINE */
+    const stats = state.engine ? state.engine.stats : null;
+    const pb = state.playback ? state.playback.snapshot() : null;
+    const limited = !!(stats && stats.limited);
+    setTag(el.psEngineTag, limited ? 'GPU limited' : (on ? 'Running' : 'Stopped'),
+      limited ? '' : (on ? 'ok' : ''));
+    const engine = psCell(el.psEngine);
+    if (on && stats) {
+      engine.set(`${Math.round(stats.droppedScale * 100)}% · ${stats.policy}`,
+        `${stats.cpuMs} / ${stats.frameBudgetMs} ms${pb ? ` · ${pb.presentedFps} fps` : ''}`);
+    } else {
+      engine.set('Idle', pb ? `${pb.presentedFps} fps presented` : 'no GPU work');
+    }
+  }
+
+  /**
+   * The look readouts alone.
+   *
+   * Called from the slider path, where a full strip rebuild would be work
+   * proportional to how fast someone drags.
+   */
+  function refreshLookReadouts() {
+    if (el.processStrip && !el.processStrip.hidden) {
+      const changed = modifiedParamCount();
+      setTag(el.psLookTag, changed ? `${changed} changed` : '', changed ? 'on' : '');
+      psCell(el.psLook).set(currentLookName(),
+        changed ? 'edited from the preset' : 'at preset values');
+    }
+    refreshFineTuneContext();
+  }
+
+  /* ---- Fine Tune's context (formerly the Adjust inspector's) ---------- */
+
+  /**
+   * What the parameters below are acting on.
+   *
+   * The collapsed summary has to be worth reading on its own, because the
+   * whole point of collapsing Fine Tune is that most sessions never open it:
+   * the tag says how far the look has been moved off its preset, so a glance
+   * at the closed row answers "have I changed anything".
+   */
+  function refreshFineTuneContext() {
+    if (!el.adjustEnhanceState) return;
+    const on = !!(state.params && state.params.enabled);
+    const changed = modifiedParamCount();
+
+    if (el.fineTuneTag) {
+      el.fineTuneTag.textContent = changed
+        ? `${changed} changed`
+        : (on ? 'at preset' : 'bypassed');
+      el.fineTuneTag.className = 'gtag' + (changed ? ' on' : '');
+    }
+    el.adjustEnhanceState.textContent = on ? 'On' : 'Off';
+    el.adjustEnhanceState.className = on ? 'on' : '';
+    el.adjustRenderTag.textContent = on && el.glCanvas.width
+      ? `${el.glCanvas.width}×${el.glCanvas.height}`
+      : '—';
+  }
+
+  function setWatchQuality(value) {
+    state.watchQuality = value;
+    el.watchQuality.value = value;
+    if (state.engine) state.engine.setPolicy(value);
+    api.settings.patch({ watchQuality: value });
+  }
+
+  /* ---- Operations console -------------------------------------------- */
+
+  /** Which reading of the job list the console is showing. */
+  const CONSOLE_FILTER = {
+    queue: (job) => isActiveJob(job),
+    jobs: () => true,
+    history: (job) => !isActiveJob(job)
+  };
+
+  function refreshUtilityStrip() {
+    if (!el.utilityStrip || el.utilityStrip.hidden) return;
+
+    const all = [...state.jobs.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    const active = all.filter(isActiveJob);
+    const rows = all.filter(CONSOLE_FILTER[state.consoleTab] || CONSOLE_FILTER.queue);
+
+    el.utilityQueueTag.textContent = active.length
+      ? `${active.length} active`
+      : (all.length ? `${all.length} total` : '');
+
+    el.utilityQueue.innerHTML = '';
+    if (!rows.length) {
+      const note = document.createElement('p');
+      note.className = 'utility-empty';
+      note.textContent = state.consoleTab === 'history'
+        ? 'Nothing has finished yet.'
+        : 'No renders queued. Create builds one from the current settings.';
+      el.utilityQueue.appendChild(note);
+    } else {
+      // Four is what the bay can show without scrolling at the default window
+      // height; the Queue workspace is where the whole list lives.
+      for (const job of rows.slice(0, 6)) el.utilityQueue.appendChild(consoleJobRow(job));
+    }
+
+    refreshConsoleEngines();
+  }
+
+  /**
+   * A console job row.
+   *
+   * Deliberately not the Queue's `.job` card: this is a status line, the card
+   * is the job's full account, and collapsing the two would mean one of them
+   * is wrong about how much room it has.
+   */
+  function consoleJobRow(job) {
+    const node = document.createElement('div');
+    node.className = 'op-job';
+    if (isActiveJob(job)) node.classList.add('is-active');
+    if (job.status === 'completed') node.classList.add('done');
+    if (job.status === 'failed' || job.status === 'cancelled') node.classList.add('bad');
+
+    const thumb = document.createElement('div');
+    thumb.className = 'thumb sm';
+    thumbs.paint(thumb, {
+      kind: job.source.type === 'remote' ? 'stream' : 'local',
+      source: job.source.path || job.source.webpageUrl,
+      webpageUrl: job.source.webpageUrl
+    }, { duration: job.totalDuration || null });
+
+    const body = document.createElement('div');
+    body.className = 'op-job-body';
+
+    const title = document.createElement('div');
+    title.className = 'op-job-title';
+    title.textContent = job.title;
+    title.title = job.title;
+
+    const bar = document.createElement('div');
+    bar.className = 'op-job-bar';
+    const fill = document.createElement('span');
+    fill.style.width = `${Math.round((job.progress || 0) * 100)}%`;
+    bar.appendChild(fill);
+
+    const meta = document.createElement('div');
+    meta.className = 'op-job-meta';
+    const stage = document.createElement('span');
+    stage.className = 'op-stage';
+    stage.textContent = (job.stage || STATUS_LABEL[job.status] || '').toLowerCase();
+    const numbers = document.createElement('span');
+    const bits = [`${Math.round((job.progress || 0) * 100)}%`];
+    const rate = job.neuralRate;
+    if (rate && !rate.warming && rate.framesPerSecond > 0) {
+      bits.push(`${rate.framesPerSecond.toFixed(2)} fps`);
+    } else if (job.speed) {
+      bits.push(`${job.speed.toFixed(2)}×`);
+    }
+    if (job.eta) bits.push(`~${fmtTime(job.eta)} left`);
+    numbers.textContent = bits.join(' · ');
+    meta.append(stage, numbers);
+
+    body.append(title, bar, meta);
+
+    // Only actions the job is genuinely in a state to take. The Queue card is
+    // the place for the full set; this offers the one you would reach for.
+    const actions = document.createElement('div');
+    actions.className = 'op-job-actions';
+    const button = (label, fn) => {
+      const b = document.createElement('button');
+      b.className = 'btn btn-ghost';
+      b.textContent = label;
+      b.addEventListener('click', fn);
+      actions.appendChild(b);
+    };
+    if (job.status === 'running' && job.pauseSupported) button('Pause', () => api.jobs.pause(job.id));
+    else if (job.status === 'paused') button('Resume', () => api.jobs.resume(job.id));
+    if (isActiveJob(job)) button('Cancel', () => api.jobs.cancel(job.id));
+    else button('Open', () => setWorkspace('queue'));
+
+    node.append(thumb, body, actions);
+    return node;
+  }
+
+  /**
+   * The engines-and-storage bay.
+   *
+   * States come from the engine status the app already fetched and the
+   * detector's own status; nothing is polled for this panel, and an engine
+   * whose state is unknown says "checking" rather than guessing.
+   */
+  function refreshConsoleEngines() {
+    if (!el.consoleEngines) return;
+    const rows = [
+      ['Real-ESRGAN', engineState('realesrgan')],
+      ['RIFE', engineState('rife')],
+      ['Face & person detection', state.semantic
+        ? (state.semantic.status === 'ready' ? 'installed' : 'not installed')
+        : 'checking']
+    ];
+
+    const ready = rows.filter(([, s]) => s === 'installed').length;
+    el.consoleEngineTag.textContent = `${ready}/${rows.length}`;
+
+    el.consoleEngines.innerHTML = '';
+    for (const [name, status] of rows) {
+      const row = document.createElement('div');
+      row.className = 'eng-row';
+      const dot = document.createElement('span');
+      dot.className = 'dot-state' + (status === 'installed' ? ' ok' : '');
+      const label = document.createElement('span');
+      label.className = 'eng-name';
+      label.textContent = name;
+      const state_label = document.createElement('span');
+      state_label.className = 'eng-state' + (status === 'installed' ? ' ok' : ' off');
+      state_label.textContent = status === 'installed' ? 'Ready' : status;
+      row.append(dot, label, state_label);
+      el.consoleEngines.appendChild(row);
+    }
+
+    const sep = document.createElement('div');
+    sep.className = 'eng-sep';
+    el.consoleEngines.appendChild(sep);
+
+    const cache = document.createElement('div');
+    cache.className = 'eng-row';
+    const label = document.createElement('span');
+    label.className = 'eng-name';
+    label.textContent = 'Thumbnail cache';
+    const value = document.createElement('span');
+    value.className = 'eng-state';
+    value.textContent = state.thumbCache
+      ? `${state.thumbCache.count} · ${fmtBytes(state.thumbCache.bytes || 0)}`
+      : '—';
+    cache.append(label, value);
+    el.consoleEngines.appendChild(cache);
+  }
+
+  function engineState(id) {
+    const engine = state.engines && state.engines[id];
+    if (!engine) return 'checking';
+    return engine.status === 'ready' ? 'installed' : 'not installed';
+  }
+
+  /* ---- Queue workspace side column ----------------------------------- */
+
+  function refreshQueueSide() {
+    if (!el.queueStats) return;
+    const all = [...state.jobs.values()];
+    const active = all.filter(isActiveJob);
+    const running = active.find((j) => j.status === 'running');
+    const done = all.filter((j) => j.status === 'completed').length;
+    const failed = all.filter((j) => j.status === 'failed').length;
+
+    el.queueStateTag.textContent = running ? 'Rendering' : (active.length ? 'Waiting' : 'Idle');
+    el.queueStateTag.className = 'col-tag' + (running ? ' on' : '');
+
+    const stats = el.queueStats;
+    stats.innerHTML = '';
+    specRow(stats, 'Active', String(active.length), active.length ? 'accent' : 'muted');
+    specRow(stats, 'Completed', String(done), done ? 'ok' : 'muted');
+    if (failed) specRow(stats, 'Failed', String(failed), 'accent');
+    if (running) {
+      specRow(stats, 'Stage', (running.stage || STATUS_LABEL[running.status] || '—').toLowerCase(), 'strong');
+      specRow(stats, 'Progress', `${Math.round((running.progress || 0) * 100)}%`, 'strong');
+      const rate = running.neuralRate;
+      if (rate && !rate.warming && rate.framesPerSecond > 0) {
+        specRow(stats, 'Rate', `${rate.framesPerSecond.toFixed(2)} fps`);
+      } else if (running.speed) {
+        specRow(stats, 'Rate', `${running.speed.toFixed(2)}×`);
+      }
+      if (running.eta) specRow(stats, 'Remaining', `~${fmtTime(running.eta)}`, 'accent');
+    }
+
+    const engines = el.queueEngines;
+    engines.innerHTML = '';
+    specRow(engines, 'Real-ESRGAN', engineState('realesrgan') === 'installed' ? 'ready' : 'absent',
+      engineState('realesrgan') === 'installed' ? 'ok' : 'muted');
+    specRow(engines, 'RIFE', engineState('rife') === 'installed' ? 'ready' : 'absent',
+      engineState('rife') === 'installed' ? 'ok' : 'muted');
+    const semantic = state.semantic && state.semantic.status === 'ready';
+    specRow(engines, 'Subject detection', semantic ? 'ready' : 'absent', semantic ? 'ok' : 'muted');
+    specRow(engines, 'ffmpeg', state.info && state.info.binaries.ffmpeg.path ? 'ready' : 'missing',
+      state.info && state.info.binaries.ffmpeg.path ? 'ok' : 'accent');
+
+    refreshQueueActive(running || active[0] || null);
+
+    const storage = el.queueStorage;
+    if (storage) {
+      storage.innerHTML = '';
+      specRow(storage, 'Thumbnails', state.thumbCache
+        ? `${state.thumbCache.count} · ${fmtBytes(state.thumbCache.bytes || 0)}`
+        : '—', state.thumbCache ? null : 'muted');
+      const delivered = all.filter((j) =>
+        j.status === 'completed' && j.output && j.output.sizeBytes);
+      const bytes = delivered.reduce((sum, j) => sum + j.output.sizeBytes, 0);
+      specRow(storage, 'Rendered out', delivered.length ? fmtBytes(bytes) : '—',
+        delivered.length ? 'strong' : 'muted');
+      specRow(storage, 'Jobs held', String(all.length), all.length ? null : 'muted');
+    }
+  }
+
+  /**
+   * What the running render is actually doing.
+   *
+   * The stage chain comes off the job record, so it is the pipeline this job
+   * resolved rather than a fixed diagram: a job with no neural stage has no
+   * UPSCALE step and the module shows that. With nothing rendering it says so
+   * — an idle render manager that draws a dimmed template is claiming to know
+   * something it does not.
+   */
+  /**
+   * A job's stage list, normalised.
+   *
+   * The job manager plans stages as records — `{ id, label, mode, status }` —
+   * and a stage that does not apply to this recipe is planned as `skipped`
+   * rather than left out, so the chain has to drop those itself or it claims
+   * the job will do work it will not. Plain strings are also accepted because
+   * that is the shape the verification harness pushes through the same IPC
+   * event, and a readout that only survives one of its two real inputs is a
+   * readout that throws in front of a user.
+   *
+   * State comes from each stage's own status where there is one, and falls
+   * back to position against `job.stage` where there is not.
+   */
+  function stageChain(job) {
+    if (!Array.isArray(job.stages) || !job.stages.length) return [];
+
+    const steps = job.stages
+      .map((s) => (typeof s === 'string' ? { id: s, status: null } : s))
+      .filter((s) => s && s.id && s.status !== 'skipped' && s.mode !== 'skipped');
+
+    const current = String(job.stage || '').toUpperCase();
+    const at = steps.findIndex((s) => String(s.id).toUpperCase() === current);
+
+    return steps.map((s, i) => {
+      const isNow = s.status === 'running' || (s.status === null && i === at);
+      const isDone = s.status === 'completed' ||
+        (s.status === null && at >= 0 && i < at);
+      return {
+        name: String(s.id).toLowerCase(),
+        state: isNow ? 'is-now' : (isDone ? 'is-done' : '')
+      };
+    });
+  }
+
+  function refreshQueueActive(job) {
+    const host = el.queueActive;
+    if (!host) return;
+
+    el.queueActiveTag.textContent = job ? (STATUS_LABEL[job.status] || job.status) : '';
+    el.queueActiveTag.className = 'col-tag' + (job && job.status === 'running' ? ' on' : '');
+
+    host.innerHTML = '';
+    if (!job) {
+      const note = document.createElement('p');
+      note.className = 'mini-empty';
+      note.textContent = 'Nothing is rendering. Queue a build from Create and its stages appear here.';
+      host.appendChild(note);
+      return;
+    }
+
+    const title = document.createElement('div');
+    title.className = 'qa-title';
+    title.textContent = job.title;
+    title.title = job.title;
+    host.appendChild(title);
+
+    // The resolved pipeline, with the stage it is on marked.
+    const chainSteps = stageChain(job);
+    if (chainSteps.length) {
+      const chain = document.createElement('div');
+      chain.className = 'qa-stages';
+      for (const step of chainSteps) {
+        const node = document.createElement('span');
+        node.className = 'qa-stage' + (step.state ? ` ${step.state}` : '');
+        node.textContent = step.name;
+        chain.appendChild(node);
+      }
+      host.appendChild(chain);
+    }
+
+    const specs = document.createElement('div');
+    specs.className = 'spec-list flush';
+    if (job.plan && job.plan.description) specRow(specs, 'Plan', job.plan.description);
+    if (job.plan && job.plan.chunked && job.plan.chunkCount) {
+      specRow(specs, 'Chunks', String(job.plan.chunkCount));
+    }
+    if (job.cost && job.cost.label) {
+      specRow(specs, 'Cost', job.cost.label.toLowerCase(), 'accent');
+    }
+    if (job.attempts > 1) specRow(specs, 'Attempts', String(job.attempts), 'accent');
+    if (specs.childElementCount) host.appendChild(specs);
+
+    // Why it costs what it costs, in the job's own words.
+    const reasons = (job.cost && job.cost.reasons) || [];
+    if (reasons.length) {
+      const note = document.createElement('p');
+      note.className = 'qa-note';
+      note.textContent = reasons.join(' · ');
+      host.appendChild(note);
+    }
+  }
+
+  /* ---- Status bar ----------------------------------------------------- */
+
+  /**
+   * The window's bottom edge.
+   *
+   * Four real facts: the build, whether the binaries this app cannot work
+   * without are present, the render actually running, and the device the
+   * engine reported. No invented health, and no metric that would need its own
+   * poll to keep honest.
+   */
+  function refreshStatusBar() {
+    if (!el.statusbar) return;
+
+    if (state.info) {
+      el.sbVersion.textContent = `Visionance v${state.info.version}`;
+    }
+
+    const bins = state.info ? state.info.binaries : null;
+    const dot = el.sbHealth.querySelector('.dot-state');
+    const text = el.sbHealth.querySelector('.sb-text');
+    if (!bins) {
+      dot.className = 'dot-state';
+      text.textContent = 'Starting…';
+    } else if (!bins.ffmpeg.path) {
+      dot.className = 'dot-state bad';
+      text.textContent = 'ffmpeg not found — rendering unavailable';
+    } else if (!bins.ytdlp.path) {
+      dot.className = 'dot-state warn';
+      text.textContent = 'yt-dlp not installed — local files only';
+    } else {
+      dot.className = 'dot-state ok';
+      text.textContent = 'ffmpeg and yt-dlp ready';
+    }
+
+    const active = [...state.jobs.values()].filter(isActiveJob);
+    const running = active.find((j) => j.status === 'running') || active[0];
+    if (running) {
+      const pct = Math.round((running.progress || 0) * 100);
+      el.sbRender.textContent =
+        `${(running.stage || STATUS_LABEL[running.status] || 'render').toUpperCase()} · ${pct}%` +
+        (running.eta ? ` · ~${fmtTime(running.eta)} left` : '');
+      el.sbRender.classList.add('is-active');
+    } else {
+      el.sbRender.textContent = 'No active renders';
+      el.sbRender.classList.remove('is-active');
+    }
+
+    el.sbDevice.textContent = deviceName();
+  }
+
+  /**
+   * A readable name for the device the picture is being drawn on.
+   *
+   * The engine reports WebGL's own renderer string, which on Windows is an
+   * ANGLE description with the D3D feature levels and a PCI id in it. The
+   * adapter name inside it is the part worth showing; the rest is noise on a
+   * 26px bar. Nothing is invented — if the string cannot be read, the bar says
+   * nothing rather than guessing.
+   */
+  function deviceName() {
+    const raw = state.engine && state.engine.stats ? state.engine.stats.gpu : null;
+    if (!raw) return '';
+    const angle = /^ANGLE \(([^,]+),\s*([^,]+?)(?:\s*\([^)]*\))?\s*(?:Direct3D|OpenGL|Vulkan)/.exec(raw);
+    if (angle) return angle[2].trim();
+    return String(raw).slice(0, 44);
+  }
+
+  /* ---- Integrated window chrome --------------------------------------- *
+   *
+   * The top bar is the window's title bar. The minimise / maximise / close
+   * buttons are the real native ones, drawn by the compositor over the right
+   * of that bar, so this only has to keep our own controls out from under
+   * them. Chromium reports where they are through the Window Controls Overlay
+   * API and fires `geometrychange` when they move — an event, not a poll.
+   * ------------------------------------------------------------------ */
+
+  const TITLEBAR_FALLBACK_INSET = 148;
+
+  function applyWindowChrome() {
+    const platform = state.info && state.info.platform;
+    // macOS keeps its traffic lights at the left, so the brand is inset there
+    // instead. Nothing else about the bar changes.
+    document.body.classList.toggle('is-mac', platform === 'darwin');
+    if (platform === 'darwin') return;
+
+    // The stylesheet takes the inset from the titlebar-area environment
+    // variables, which Chromium keeps current on its own. This only has to
+    // notice the case where the overlay exists and those are not available,
+    // and reserve the buttons' usual width so nothing ends up underneath one.
+    if (!navigator.windowControlsOverlay) {
+      document.body.classList.add('no-titlebar-metrics');
+      document.documentElement.style.setProperty(
+        '--titlebar-inset', `${TITLEBAR_FALLBACK_INSET}px`);
+    }
+  }
+
+  /** Everything Watch paints from player and engine state. */
+  function refreshWatchSurfaces() {
+    refreshWatchSource();
+    refreshSourceDetails();
+    refreshProcessStrip();
+    refreshFineTuneContext();
   }
 
   /* ------------------------------------------------------------------ *
@@ -2637,10 +4281,20 @@
    * ------------------------------------------------------------------ */
 
   function openSettings() {
+    refreshSemanticStatus();
     el.settingsModal.hidden = false;
     refreshDependencyStatus();
     refreshEngines();
     refreshRuntimeStatus();
+    refreshThumbCacheStatus();
+    // The Diagnostics section hosts a telemetry view; it only samples while it
+    // is the visible section, which this re-evaluates.
+    telemetry.refreshVisibility();
+  }
+
+  function closeSettings() {
+    el.settingsModal.hidden = true;
+    telemetry.refreshVisibility();
   }
 
   async function refreshDependencyStatus() {
@@ -2657,15 +4311,18 @@
         : 'No JavaScript runtime found; some sites may withhold higher qualities.');
       el.ytdlpStatus.textContent = bits.join(' ');
       el.installYtdlpBtn.textContent = 'Reinstall';
+      setDot(el.ytdlpDot, yt.stale ? 'warn' : 'ok');
     } else {
       el.ytdlpStatus.textContent = 'Not found. Online video playback needs it.';
       el.installYtdlpBtn.textContent = 'Install';
+      setDot(el.ytdlpDot, 'warn');
     }
 
     const ff = res.binaries.ffmpeg;
     el.ffmpegStatus.textContent = ff.path
       ? `Ready — ${(ff.version || '').replace('ffmpeg version ', '').split(' ')[0] || 'ok'}`
       : 'Not found. Exporting is unavailable until ffmpeg is located.';
+    setDot(el.ffmpegDot, ff.path ? 'ok' : 'bad');
 
     el.aboutText.textContent =
       `Visionance ${res.version} · Electron ${res.versions.electron} · Chromium ${res.versions.chrome} · ${res.platform}/${res.arch}`;
@@ -2684,9 +4341,9 @@
 
   function bindSettings() {
     el.settingsBtn.addEventListener('click', openSettings);
-    el.closeSettings.addEventListener('click', () => { el.settingsModal.hidden = true; });
+    el.closeSettings.addEventListener('click', closeSettings);
     el.settingsModal.addEventListener('mousedown', (e) => {
-      if (e.target === el.settingsModal) el.settingsModal.hidden = true;
+      if (e.target === el.settingsModal) closeSettings();
     });
 
     el.closeInfo.addEventListener('click', () => { el.infoModal.hidden = true; });
@@ -2763,15 +4420,152 @@
    * Global bindings
    * ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------ *
+   * Workspaces
+   *
+   * The four tabs are the application's top-level navigation. Create and
+   * Watch keep the player on screen because both are about a picture you are
+   * looking at; Queue and Library are documents, so the stage steps aside and
+   * they take the window.
+   *
+   * The media element is never touched here. Playback, the source lifecycle
+   * and the presentation mode belong to switchSource() and
+   * applyPresentationMode(); a navigation change that could pause a video or
+   * re-aim a render would be exactly the coupling this app is built to avoid.
+   * ------------------------------------------------------------------ */
+
+  function setWorkspace(name) {
+    if (!document.querySelector(`.tab-page[data-page="${name}"]`)) return;
+    state.workspace = name;
+    document.body.dataset.workspace = name;
+
+    document.querySelectorAll('.tab').forEach((t) => {
+      const active = t.dataset.tab === name;
+      t.classList.toggle('active', active);
+      t.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    document.querySelectorAll('.tab-page').forEach((p) => {
+      p.classList.toggle('active', p.dataset.page === name);
+    });
+
+    /*
+     * Which of the shell's tracks this workspace wants.
+     *
+     * Create is the full workstation: source column, viewer, console,
+     * inspector. Watch is player-first but not bare — it takes the strip and
+     * the console too, because both describe the thing Watch owns. What Watch
+     * does not take is the performance bay: the stylesheet drops that one, and
+     * that is load-bearing rather than cosmetic, because the telemetry
+     * controller subscribes on a view being on screen and a perf bay in Watch
+     * would mean nvidia-smi running every two seconds for anyone just watching
+     * a video. Queue and Library are documents and take the window.
+     */
+    el.sourceColumn.hidden = name !== 'create';
+    el.utilityStrip.hidden = !(name === 'create' || name === 'presets');
+    // The strip reads the *player*. In Watch that is the source it names; in
+    // Create the player is still Watch's video rather than the file being
+    // rendered, so saying "Source" there would name the wrong one.
+    el.processStrip.hidden = name !== 'presets';
+
+    if (name === 'create' || name === 'presets') refreshUtilityStrip();
+    if (name === 'create') refreshCreateHome();
+    if (name === 'presets') refreshWatchSurfaces();
+    if (name === 'library') refreshLibrarySummary();
+    if (name === 'queue') refreshQueueSide();
+
+    // Telemetry samples only while a view is genuinely on screen.
+    telemetry.refreshVisibility();
+    // The canvas size follows the stage, which just changed.
+    requestAnimationFrame(positionSplitHandle);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Player settings popover
+   *
+   * Speed and loop are real controls living inside the popover, not mirrors
+   * of controls kept elsewhere, so there is one source of truth for each. The
+   * stream rows are read-only facts about what is actually playing.
+   * ------------------------------------------------------------------ */
+
+  function bindPlayerSettings() {
+    el.playerSettingsBtn.addEventListener('click', () => {
+      if (togglePopover(el.playerPopover, el.playerSettingsBtn)) refreshPlayerPopover();
+    });
+
+    el.loopToggle.addEventListener('change', () => {
+      el.video.loop = el.loopToggle.checked;
+      el.audio.loop = el.loopToggle.checked;
+    });
+
+    el.popoverStats.addEventListener('click', () => {
+      el.statsBtn.click();
+      refreshPlayerPopover();
+    });
+
+    el.popoverInfo.addEventListener('click', () => {
+      closePopover();
+      el.infoModal.hidden = false;
+    });
+  }
+
+  /** Only refreshed when the popover is opened, never on a timer. */
+  function refreshPlayerPopover() {
+    const media = state.media;
+    el.popoverQuality.textContent = media
+      ? (media.selectedQuality || (media.kind === 'local' ? 'Local file' : '—'))
+      : '—';
+    const v = el.video;
+    el.popoverSource.textContent = v.videoWidth
+      ? `${v.videoWidth}×${v.videoHeight}`
+      : '—';
+    el.popoverStatsState.textContent = el.statsOverlay.hidden ? 'Off' : 'On';
+    el.speedSelect.value = String(el.video.playbackRate || 1);
+    el.loopToggle.checked = !!el.video.loop;
+  }
+
+  function bindConsole() {
+    for (const tab of el.consoleTabs.querySelectorAll('.bay-tab')) {
+      tab.addEventListener('click', () => {
+        state.consoleTab = tab.dataset.console;
+        for (const other of el.consoleTabs.querySelectorAll('.bay-tab')) {
+          const active = other === tab;
+          other.classList.toggle('active', active);
+          other.setAttribute('aria-selected', active ? 'true' : 'false');
+        }
+        refreshUtilityStrip();
+      });
+    }
+  }
+
   function bindGlobal() {
     document.querySelectorAll('.tab').forEach((tab) => {
-      tab.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
-        document.querySelectorAll('.tab-page').forEach((p) => p.classList.remove('active'));
-        tab.classList.add('active');
-        document.querySelector(`.tab-page[data-page="${tab.dataset.tab}"]`).classList.add('active');
+      tab.addEventListener('click', () => setWorkspace(tab.dataset.tab));
+    });
+
+    // Settings section rail.
+    el.settingsNav.querySelectorAll('button').forEach((button) => {
+      button.addEventListener('click', () => {
+        el.settingsNav.querySelectorAll('button').forEach((b) => b.classList.remove('active'));
+        button.classList.add('active');
+        document.querySelectorAll('[data-settings-page]').forEach((page) => {
+          page.hidden = page.dataset.settingsPage !== button.dataset.settings;
+        });
+        telemetry.refreshVisibility();
       });
     });
+
+    el.clearThumbsBtn.addEventListener('click', async () => {
+      const r = await api.thumbnails.clear();
+      if (!r.ok) return reportFailure(r);
+      thumbs.reset();
+      refreshThumbCacheStatus();
+      renderJobs();
+      const recents = await api.recents.get();
+      if (recents.ok) renderRecents(recents.recents);
+      toast(`Thumbnail cache cleared (${r.removed} file${r.removed === 1 ? '' : 's'}).`, 'ok');
+    });
+
+    el.jobStrip.addEventListener('click', () => setWorkspace('queue'));
 
     el.goBtn.addEventListener('click', onOmnibarPlay);
     el.urlInput.addEventListener('keydown', (e) => {
@@ -2790,16 +4584,17 @@
     el.openFileBtn.addEventListener('click', pickFile);
     el.emptyOpenBtn.addEventListener('click', pickFile);
 
-    el.watchQuality.addEventListener('change', () => {
-      state.watchQuality = el.watchQuality.value;
-      if (state.engine) state.engine.setPolicy(state.watchQuality);
-      api.settings.patch({ watchQuality: state.watchQuality });
-    });
+    // One control, one writer. The Adjust workspace used to carry a second,
+    // segmented view of this same value; with both panels merged into Watch a
+    // duplicate would just be two controls to keep in step.
+    el.watchQuality.addEventListener('change', () => setWatchQuality(el.watchQuality.value));
+    el.adjustToCreateBtn.addEventListener('click', sendToCreate);
 
     el.scaleSelect.addEventListener('change', () => {
       const value = el.scaleSelect.value;
       state.engine && state.engine.setRenderScaleCap(value === 'auto' ? 'auto' : Number(value));
       api.settings.patch({ renderScale: value });
+      updateResBadge();
     });
 
     el.adaptiveToggle.addEventListener('change', () => {
@@ -2885,6 +4680,12 @@
       el.createLoudness, el.createQuality]) {
       control.addEventListener('change', markRecipeModified);
     }
+    // Every control that a section summary or the render summary reports on.
+    for (const control of [el.createAudio, el.createLoudness, el.createUseLook,
+      el.createFps, el.createInterp, el.createFraming, el.createPlatform,
+      el.createAi, el.createAiQuality, el.createAspect, el.createRes]) {
+      control.addEventListener('change', refreshGroupTags);
+    }
     // Geometry controls reflect into each other, then re-price the job.
     for (const control of [el.createAspect, el.createRes]) {
       control.addEventListener('change', () => { syncGeometryUi(); schedulePreview(); });
@@ -2965,7 +4766,7 @@
         return;
       }
       if (!el.settingsModal.hidden || !el.infoModal.hidden) {
-        if (e.key === 'Escape') { el.settingsModal.hidden = true; el.infoModal.hidden = true; }
+        if (e.key === 'Escape') { closeSettings(); el.infoModal.hidden = true; }
         return;
       }
 
@@ -3004,7 +4805,9 @@
     api.events.onMenu((command) => {
       const actions = {
         'open-file': pickFile,
-        'open-url': () => el.urlInput.focus(),
+        // The URL box lives in Watch's source module now, so Ctrl+L goes there
+        // rather than focusing a control on a workspace you cannot see.
+        'open-url': () => { setWorkspace('presets'); el.urlInput.focus(); },
         create: sendToCreate,
         'toggle-play': () => media.toggle(),
         'toggle-enhance': () => el.enhanceToggle.click(),
@@ -3094,9 +4897,20 @@
     bindSplit();
     bindStats();
     bindSettings();
+    bindSemantic();
+    bindPlayerSettings();
     bindGlobal();
+    bindConsole();
     bindIdle();
+    applyWindowChrome();
 
+    // One telemetry controller, two views. Neither samples unless it is on
+    // screen and the window is visible.
+    telemetry.attach(el.utilityTelemetry, { compact: true });
+    telemetry.attach(el.settingsTelemetry, { compact: false });
+
+    refreshStatusBar();
+    refreshWatchSource();
     renderRecents(recentsRes.ok ? recentsRes.recents : []);
     populateEncoders();
     await populatePlatforms();
@@ -3106,6 +4920,7 @@
     refreshSavedRecipes();
     refreshEngines();
     refreshRuntimeStatus();
+    refreshSemanticStatus();
     refreshDependencyStatus().then(() => {
       if (state.info && !state.info.binaries.ytdlp.path) {
         toast('Install yt-dlp in Settings to play online video links.', 'warn', 8000);
@@ -3115,6 +4930,26 @@
     const jobsRes = await api.jobs.list();
     if (jobsRes.ok) jobsRes.jobs.forEach((j) => state.jobs.set(j.id, j));
     renderJobs();
+
+    /*
+     * The opening workspace, chosen once and by one function.
+     *
+     * Boot used to leave this to the markup: the body carried a workspace
+     * attribute and one tab carried `.active`, but nothing gave any
+     * `.tab-page` its `.active` class and nothing cleared the `hidden`
+     * attribute on the source column, the process strip or the console. So a
+     * fresh launch showed a player with an empty inspector and no strip, and
+     * the app only became whole when the user clicked a tab — because
+     * `setWorkspace()` is what actually reconciles all of it, and until then
+     * it had never run.
+     *
+     * Calling it here makes it the single authority: the static attributes are
+     * now only a first-paint hint, and every workspace is fully rendered the
+     * first time it is shown whether or not another was visited first. It runs
+     * after the data above so the workspace it opens has something to paint.
+     */
+    setWorkspace('create');
+
     const interrupted = [...state.jobs.values()].filter((j) => j.status === 'interrupted');
     if (interrupted.length) {
       toast(
@@ -3123,13 +4958,19 @@
       );
     }
 
-    // Persist the active preset so the next launch feels continuous.
+    // Housekeeping, deliberately slow: persist the active preset so the next
+    // launch feels continuous, and refresh the two derived readouts that no
+    // event covers. Three seconds, not per frame - the picture is drawn by the
+    // engine, and the UI has no business running at its cadence.
     setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
       if (state.presetId !== '__custom' && state.settings.lastPresetId !== state.presetId) {
         state.settings.lastPresetId = state.presetId;
         api.settings.patch({ lastPresetId: state.presetId });
       }
       updateResBadge();
+      refreshStatusBar();
+      if (state.workspace === 'presets') refreshWatchSurfaces();
     }, 3000);
   }
 

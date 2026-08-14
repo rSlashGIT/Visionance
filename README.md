@@ -23,6 +23,47 @@ already have.
 
 ---
 
+## The interface
+
+Four workspaces, one top-level navigation. Visionance opens on Create:
+
+| Workspace | What it is for |
+|---|---|
+| **Create** | The command centre and the render workspace. Source intake, recents, analysis, the recipe, and the queue and machine state under the preview. |
+| **Watch** | The complete realtime workspace: the player, the source, the Looks, Fine Tune — every enhancement parameter — the realtime engine and the display settings. |
+| **Queue** | A job manager. One row per render; technical detail behind a disclosure. |
+| **Library** | Recent media as cards, with the thumbnails those sources carry everywhere else. |
+
+Create and Watch keep the player on screen. Queue and Library are documents, so
+the stage steps aside — playback continues, and an active render shows as a
+small strip in the top bar you can click to come back to it.
+
+Enhancement parameters used to live in a separate Adjust workspace. They were
+never a separate job — they are the realtime look — so they are now **Fine
+Tune** inside Watch: collapsed by default, one click from any Look.
+
+**Every media source gets one thumbnail and keeps it.** A local file is
+extracted once with ffmpeg at roughly a quarter of the way in — not frame zero,
+which for most edits is black, a slate or a fade — and an online source reuses
+the poster yt-dlp already returned. The same image then appears in Create, the
+Queue and the Library, because they all resolve the same cache key. Nothing is
+re-extracted when a list re-renders.
+
+**The interface is built to stay out of the way of the work.** There is no
+ambient animation, no decorative canvas and nothing that redraws per video
+frame: the diagnostics overlay writes twice a second while it is open and stops
+outright when it is closed, telemetry samples every two seconds and only while a
+performance panel is actually visible, and the Queue windows its history rather
+than building a card for every render you have ever run. The GPU graph is a
+small canvas over a fixed 60-point ring buffer, redrawn once per sample.
+
+**Nothing shows a number it did not measure.** GPU utilisation and VRAM come
+from `nvidia-smi` where it exists; on hardware that exposes no such interface
+the panel says so and plots Visionance's own CPU share instead, under its own
+label. Temperature, power and clock are not reported at all.
+
+---
+
 ## Watch
 
 ### What it actually does
@@ -48,8 +89,8 @@ Nine built-ins, each tuned for a specific failure mode rather than a vague
 `Film / Cinematic` · `Sports / Motion` · `Low Light` · `Screencast / Text` ·
 `Vivid Showcase`
 
-Every parameter is exposed in the **Adjust** tab, and any combination can be
-saved as your own preset.
+Every parameter is exposed under **Fine Tune** in the Watch workspace, and any
+combination can be saved as your own preset.
 
 ### Playback comes first
 
@@ -73,7 +114,7 @@ With enhancement **on**, a governor protects the motion:
   itself off** and tells you why. A sharper picture that stutters is not a trade
   worth making silently.
 
-**Playback quality** (Watch tab): `Auto`, `Performance`, `Balanced`, `Quality`,
+**Playback quality** (Watch): `Auto`, `Performance`, `Balanced`, `Quality`,
 `Maximum`. Auto seeks the best quality that keeps motion smooth. None of these
 affect Create's offline AI quality — that is a separate setting.
 
@@ -122,7 +163,7 @@ memory or written to disk.
 
 ## Create
 
-The **Create** tab renders a real file with ffmpeg, and the **Queue** tab tracks
+The **Create** workspace renders a real file with ffmpeg, and the **Queue** tracks
 it.
 
 **Create has its own source.** Choose a file, paste a URL, or press *Use current
@@ -214,10 +255,16 @@ subject in half. Smart Reframe samples the video at low resolution, finds where
 the interesting content is, builds a smoothed crop path and applies it as part
 of the normal filter graph.
 
-- **Backend: motion + detail saliency.** This is *not* face detection — it finds
-  the moving, in-focus subject, which covers most creator footage. The backend
-  id travels with every job so the app never claims more than it does. A
-  face/person detector is the obvious upgrade and the interface is built for it.
+- **Two backends, layered.** A local face and person detector runs *above* the
+  motion-and-detail saliency tracker, which remains in place and remains the
+  right answer for gameplay, vehicles, wide action and anything non-human.
+  Saliency alone loses a stationary presenter to moving foliage — on a real
+  fixture it put the crop at 0.61 while the person stood at 0.83 — because
+  foliage genuinely has more motion energy than someone standing still. That is
+  the case the semantic layer exists for.
+- **The backend name is counted, not claimed.** Every sample records which
+  signal decided it, and the label comes from those counts: a run that fell
+  back to saliency reports saliency however much detection is installed.
 - **Scene cuts reset the tracker.** At a hard cut the crop snaps to the new
   shot's subject rather than gliding across, which would look like a camera move
   that never happened.
@@ -376,11 +423,13 @@ running.
 
 ### What Create does *not* do yet
 
-Speech transcription, subtitles, and **semantic** subject tracking — a face or
-person detector — are absent. Smart Reframe tracks motion and detail saliency,
-which is a different and more modest thing, and the UI says so rather than
-calling it face AI. Nothing in the UI claims a capability that is not
-implemented.
+Speech transcription and subtitles are absent.
+
+Semantic subject tracking — the face and person detector — is **optional**, not
+assumed: without those models Smart Reframe tracks motion and detail saliency,
+which is a different and more modest thing, and the UI says which one it will
+use before you render and which one actually decided each sample afterwards.
+Nothing in the UI claims a capability that is not installed.
 
 Visionance is a finishing processor, not an editor. There is no timeline, no
 transitions, no keyframe animation — bring a finished edit.
@@ -499,12 +548,17 @@ src/
     ffmpeg/             encoders · filters · command · process
     jobs/               job-manager · job-store · workspace · chunking ·
                         pipeline · stages/{encode,mux,verify}
+    thumbnails.js       One poster per source: extract, fetch, cache
+    telemetry.js        Measured CPU/memory/GPU, sampled only when watched
   renderer/
     index.html          UI shell
-    styles.css          Theme
+    styles.css          Design tokens and the component system
     js/shaders.js       GLSL ES 3.00 sources for all four passes
     js/engine.js        WebGL2 context, framebuffers, frame loop, adaptive quality
     js/presets.js       Built-in presets and the slider definitions
+    js/ui-kit.js        Icons, popover controller, formatters
+    js/thumbs.js        Thumbnail identity and the "never ask twice" cache
+    js/telemetry-ui.js  One telemetry subscription, one canvas graph
     js/app.js           UI wiring
 docs/architecture.md    How the pieces fit, and why
 tools/                  Verification harnesses (dev only, not shipped)
@@ -577,7 +631,7 @@ the app downloads it on request.
 
 ## Verification
 
-Nine harnesses:
+Eleven harnesses:
 
 ```bash
 npm run verify:creator   # Auto decisions, Smart Reframe trajectories, colour
@@ -591,6 +645,10 @@ npm run verify:watch     # stream-height policy, Watch codec ranking, the
 npm run verify:create    # aspect-ratio geometry and validation, resolved-plan
                          # cost classification, Auto's inference-quality
                          # decisions, Smart Reframe telemetry consistency
+npm run verify:reframe   # subject-tracking policy against synthetic detections
+                         # (static, moving, occluded, two people, hard cuts,
+                         # no people, detector missing/failing), plus real
+                         # face and person inference on a photograph
 npm run verify:switch    # boots the app and drives real source switching
                          # through the real controls: local↔URL↔URL, races,
                          # Play-button semantics, Watch/Create independence,
@@ -606,6 +664,11 @@ npm run verify:ai        # interpolation timing, engine lifecycle, OOM handling,
 npm run verify:ai:core   # the same without touching the GPU
 npm run verify:app       # boots the app and asserts the IPC bridge, engine
                          # and UI all came up
+npm run verify:ui        # boots the app and drives the real interface: every
+                         # workspace, player controls, both presentation paths,
+                         # thumbnail identity and cache reuse, telemetry
+                         # subscribe/pause, hidden-state correctness and narrow
+                         # window behaviour. Writes tools/ui-shots/
 npm run verify           # all of the above
 
 # measure real frame pacing: dropped frames, cadence, jitter, buffer health
@@ -625,8 +688,11 @@ logic, and never conflates the two: if no engine is installed it says
 `Real neural inference: NOT TESTED` and still exits non-zero on any core
 failure.
 
-`verify:core`, `verify:watch`, `verify:create` and `verify:export` need no
-network and do not depend on any particular website being reachable. On a headless Linux box, prefix the Electron
+`verify:core`, `verify:watch`, `verify:create`, `verify:reframe` and
+`verify:export` need no network and do not depend on any particular website
+being reachable. `verify:reframe`'s real-inference half skips itself, loudly,
+when the models are not installed or no human fixture is supplied via
+`VISIONANCE_FACE_FIXTURE`. On a headless Linux box, prefix the Electron
 harnesses with `xvfb-run -a`.
 
 ---
@@ -641,9 +707,13 @@ harnesses with `xvfb-run -a`.
 - **Live streams cannot be rendered** to a file.
 - **HDR tone mapping needs an ffmpeg build with `zscale`.** Without it the tone
   map is skipped and the job says so.
-- **Smart Reframe is saliency-based, not face detection.** It follows motion and
-  detail, which suits most footage but can prefer a moving hand over a still
-  face. A face/person detector is the planned upgrade.
+- **Smart Reframe's face and person detection is optional and CPU-only.** The
+  two models are about 4 MB and are downloaded on request; without them Smart
+  Reframe still works from motion and detail alone. Detection adds roughly
+  110 ms per sampled frame on the reference laptop and never runs during
+  playback.
+- **The detector finds faces and people, not identities.** It has no notion of
+  who anyone is, and nothing is uploaded, stored or compared against anything.
 - **The stream quality is chosen once, when the video is opened.** Going
   fullscreen afterwards does not re-resolve to a larger rendition, and a
   sustained-buffer downgrade is not implemented either. Runtime switching would
@@ -656,6 +726,15 @@ harnesses with `xvfb-run -a`.
   and switches enhancement off to protect the motion, rather than stuttering.
 - **yt-dlp is not bundled**, so online playback does nothing until you install
   it from Settings.
+- **GPU utilisation and VRAM are only shown where the system exposes them.**
+  That means `nvidia-smi`, which ships with the NVIDIA driver. There is no
+  cross-vendor interface for this, so on AMD and Intel the performance panel
+  says so and graphs Visionance's own CPU share instead. Temperature, power and
+  clock are never shown, because nothing here measures them.
+- **A thumbnail is one frame, chosen cheaply.** Roughly a quarter of the way in,
+  with one deterministic retry if that frame is essentially black. It is not a
+  content-aware key-frame search, and an online source without a poster from
+  yt-dlp gets a placeholder rather than a decoded frame.
 - **Adaptive-only sources (HLS/DASH) cannot be played in Watch.** Where a site
   offers nothing but a manifest, Visionance says so instead of showing a black
   frame. Progressive MP4 links play fine.
@@ -687,6 +766,9 @@ MIT. Bundled and downloaded third-party tools carry their own licences:
 | Electron | MIT | |
 | Real-ESRGAN | BSD-3-Clause | Xintao Wang et al.; ncnn port by nihui. Downloaded on request; bundled models carry their own upstream terms. |
 | rife-ncnn-vulkan | MIT | RIFE by Zhewei Huang et al.; ncnn port by nihui. Downloaded on request. |
+| ONNX Runtime | MIT | Microsoft. Ordinary dependency; N-API v6, so no Electron rebuild. |
+| YuNet | MIT | Face detector by Shiqi Yu and Yuantao Feng, via OpenCV Zoo. Downloaded on request (227 KB). |
+| NanoDet-Plus | Apache-2.0 | Person detector by RangiLyu, via OpenCV Zoo. Downloaded on request (3.6 MB). |
 | Node.js (managed runtime) | MIT | only if you install the private copy |
 
 The contrast-adaptive sharpening pass follows the algorithm published by AMD as

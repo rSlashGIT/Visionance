@@ -76,8 +76,14 @@ const DEFINITIONS = {
       // A neural pass is worthwhile even when the output size is unchanged:
       // "restore" repairs at the same resolution.
       if (r.reconstruction.mode === 'neural') return true;
-      return !!geometry &&
-        (geometry.scaleWidth !== geometry.sourceWidth || geometry.scaleHeight !== geometry.sourceHeight);
+      if (!geometry) return false;
+      // The *requested* size, not the pre-framing scale. When a framing canvas
+      // is active the resample happens inside the framing filter, so
+      // `scaleWidth` equals the source - but the user did ask for a different
+      // resolution and the plan should still say Reconstruct.
+      const w = geometry.requestedWidth != null ? geometry.requestedWidth : geometry.scaleWidth;
+      const h = geometry.requestedHeight != null ? geometry.requestedHeight : geometry.scaleHeight;
+      return w !== geometry.sourceWidth || h !== geometry.sourceHeight;
     },
     // `ctx.neuralUpscale` is the *resolved* answer from the engine planner, not
     // the recipe's request. Fast can decline a neural upscale it judges not

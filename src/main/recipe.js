@@ -969,6 +969,29 @@ function resolveOutputGeometry(recipe, analysis) {
   const finalW = canvasWidth || width;
   const finalH = canvasHeight || height;
 
+  /**
+   * When framing owns the canvas, it also owns the resample.
+   *
+   * The framing stage crops from the source and then scales once to the
+   * canvas. A *second* scale in front of it - which is what
+   * `reconstruction.targetResolution` produces when the user picks, say,
+   * 1080x1920 for a 9:16 output - squashes the 16:9 frame into 9:16 before the
+   * crop ever runs. The crop then operates on an already-distorted picture,
+   * and `min(iw, ih * aspect)` resolves to the full width, so it becomes a
+   * no-op: Smart Reframe tracks a subject perfectly and then has no effect on
+   * the output.
+   *
+   * Found by rendering a real 9:16 short and reading the filter graph:
+   *   scale=1080:1920, crop=w=min(iw,ih*0.563)..., scale=1080:1920
+   * The middle term can never crop anything.
+   *
+   * Suppressing the pre-scale is both correct and better: one resample instead
+   * of two, from full source resolution.
+   */
+  const framesToCanvas = !!(recipe.framing.enabled && canvasWidth && canvasHeight);
+  const preScaleW = framesToCanvas ? srcW : width;
+  const preScaleH = framesToCanvas ? srcH : height;
+
   let fps = null;
   if (recipe.output.fps) fps = recipe.output.fps;
   else if (recipe.motion.enabled && recipe.motion.targetFps) fps = recipe.motion.targetFps;
@@ -978,8 +1001,14 @@ function resolveOutputGeometry(recipe, analysis) {
     sourceWidth: srcW || null,
     sourceHeight: srcH || null,
     sourceFps: srcFps || null,
-    scaleWidth: width ? even(width) : null,
-    scaleHeight: height ? even(height) : null,
+    // What the reconstruction stage scales to *before* framing. Equal to the
+    // source when framing performs the resample itself.
+    scaleWidth: preScaleW ? even(preScaleW) : null,
+    scaleHeight: preScaleH ? even(preScaleH) : null,
+    // What reconstruction was asked for, kept so the plan can still explain
+    // itself even when framing supersedes it.
+    requestedWidth: width ? even(width) : null,
+    requestedHeight: height ? even(height) : null,
     canvasWidth: canvasWidth ? even(canvasWidth) : null,
     canvasHeight: canvasHeight ? even(canvasHeight) : null,
     width: finalW ? even(finalW) : null,

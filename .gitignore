@@ -56,3 +56,5 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+
+tools/ui-shots/

@@ -144,7 +144,7 @@
     }
   ];
 
-  /** Slider definitions drive the whole Adjust panel - add one line, get a control. */
+  /** Slider definitions drive the whole Fine Tune panel - add one line, get a control. */
   const CONTROLS = [
     {
       group: 'Restore',

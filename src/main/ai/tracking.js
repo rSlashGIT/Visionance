@@ -34,12 +34,42 @@ const { logger } = require('../logger');
 
 const log = logger.child('reframe');
 
+/**
+ * What actually produced a trajectory.
+ *
+ * These are not marketing names: `primaryBackend` is chosen from the counted
+ * contributions of each signal, so a run that fell back to saliency for most
+ * of its samples reports saliency however much semantic machinery was
+ * available.
+ */
 const TRACKER_BACKENDS = {
-  /** Implemented here: motion + detail saliency, no model required. */
   saliency: { id: 'saliency', label: 'Motion & detail saliency', requiresModel: false },
-  /** Reserved for a future ONNX face/person detector. */
-  faces: { id: 'faces', label: 'Face detection', requiresModel: true }
+  face: { id: 'face', label: 'Face tracking', requiresModel: true },
+  person: { id: 'person', label: 'Person tracking', requiresModel: true },
+  'face-person': { id: 'face-person', label: 'Face + person', requiresModel: true },
+  hybrid: { id: 'hybrid', label: 'Semantic + saliency', requiresModel: true }
 };
+
+/**
+ * Name the backend from what the samples actually used.
+ *
+ * @param {{face:number, person:number, saliency:number}} usage
+ */
+function primaryBackendFor(usage) {
+  const face = usage.face || 0;
+  const person = usage.person || 0;
+  const saliency = usage.saliency || 0;
+  const semantic = face + person;
+  if (semantic === 0) return TRACKER_BACKENDS.saliency;
+  // Saliency carried a meaningful share, so say so rather than claiming the
+  // whole trajectory came from a detector. A fifth is the threshold: below
+  // that it is a handful of gap-fills, above it the viewer is watching a
+  // crop that saliency substantially decided.
+  if (saliency > 0 && saliency / (semantic + saliency) >= 0.2) return TRACKER_BACKENDS.hybrid;
+  if (face > 0 && person > 0) return TRACKER_BACKENDS['face-person'];
+  if (face > 0) return TRACKER_BACKENDS.face;
+  return TRACKER_BACKENDS.person;
+}
 
 /** Analysis grid. Coarse on purpose: we need a position, not a segmentation. */
 const GRID_W = 32;
@@ -228,6 +258,8 @@ function buildTrajectory({ samples, cuts = [], profile = 'auto', minConfidence =
   let tracked = 0;
   let trackedConfidence = 0;
   let nextCut = 0;
+  /** Which signal decided each tracked sample. */
+  const usage = { face: 0, person: 0, saliency: 0 };
 
   for (let i = 0; i < samples.length; i++) {
     const s = samples[i];
@@ -247,13 +279,14 @@ function buildTrajectory({ samples, cuts = [], profile = 'auto', minConfidence =
         haveLock = true;
         tracked++;
         trackedConfidence += s.confidence;
+        usage[s.source || 'saliency'] = (usage[s.source || 'saliency'] || 0) + 1;
       } else {
         // A cut into a shot we cannot read is a centre fallback like any
         // other. Counting it as neither used to make the totals not add up.
         holds++;
         fallbacks++;
       }
-      points.push({ time: s.time, center: current, cut: true });
+      points.push({ time: s.time, center: current, cut: true, source: s.source || 'centre' });
       continue;
     }
 
@@ -262,12 +295,13 @@ function buildTrajectory({ samples, cuts = [], profile = 'auto', minConfidence =
       // rather than lurching to a meaningless centroid.
       holds++;
       if (!haveLock) fallbacks++;
-      points.push({ time: s.time, center: current });
+      points.push({ time: s.time, center: current, source: haveLock ? 'hold' : 'centre' });
       continue;
     }
 
     tracked++;
     trackedConfidence += s.confidence;
+    usage[s.source || 'saliency'] = (usage[s.source || 'saliency'] || 0) + 1;
 
     const target = s.center;
 
@@ -278,7 +312,7 @@ function buildTrajectory({ samples, cuts = [], profile = 'auto', minConfidence =
     if (!haveLock) {
       current = target;
       haveLock = true;
-      points.push({ time: s.time, center: current });
+      points.push({ time: s.time, center: current, source: s.source || 'saliency' });
       continue;
     }
 
@@ -286,7 +320,7 @@ function buildTrajectory({ samples, cuts = [], profile = 'auto', minConfidence =
 
     // Dead zone: ignore small wobble so a stationary subject gives a still crop.
     if (Math.abs(delta) < tuning.deadZone) {
-      points.push({ time: s.time, center: current });
+      points.push({ time: s.time, center: current, source: s.source || 'saliency' });
       haveLock = true;
       continue;
     }
@@ -297,7 +331,7 @@ function buildTrajectory({ samples, cuts = [], profile = 'auto', minConfidence =
     const step = Math.max(-maxStep, Math.min(maxStep, smoothed));
     current = Math.max(0, Math.min(1, current + step));
     haveLock = true;
-    points.push({ time: s.time, center: current });
+    points.push({ time: s.time, center: current, source: s.source || 'saliency' });
   }
 
   return {
@@ -305,6 +339,7 @@ function buildTrajectory({ samples, cuts = [], profile = 'auto', minConfidence =
     fallbacks,
     holds,
     tracked,
+    usage,
     // Mean confidence **of the samples that were actually used**. Averaging in
     // the ones we rejected would describe neither the detector nor the result.
     trackedConfidence: tracked > 0 ? trackedConfidence / tracked : 0
@@ -334,7 +369,10 @@ const TRACKED_PARTIAL = 0.25;
  * @returns {{outcome, coverage, confidence, tracked, held, centred, samples,
  *            scenes, headline, detail, warning}}
  */
-function summariseTracking({ samples, tracked, holds, fallbacks, trackedConfidence, cuts = 0 }) {
+function summariseTracking({
+  samples, tracked, holds, fallbacks, trackedConfidence, cuts = 0,
+  usage = null, semanticAvailable = false
+}) {
   const total = Math.max(1, samples);
   const coverage = tracked / total;
   const confidence = tracked > 0 ? trackedConfidence : 0;
@@ -347,6 +385,20 @@ function summariseTracking({ samples, tracked, holds, fallbacks, trackedConfiden
   const centred = fallbacks;
   const held = Math.max(0, holds - fallbacks);
 
+  // Which signal actually decided each tracked sample. The invariant the
+  // previous patch established still holds:
+  //     tracked + held + centred === samples
+  // and now, additionally:
+  //     faceSamples + personSamples + saliencySamples === tracked
+  const counts = usage || {};
+  const faceSamples = counts.face || 0;
+  const personSamples = counts.person || 0;
+  const saliencySamples = counts.saliency || 0;
+  const semanticSamples = faceSamples + personSamples;
+  const backend = primaryBackendFor({
+    face: faceSamples, person: personSamples, saliency: saliencySamples
+  });
+
   let outcome;
   if (coverage >= TRACKED_OK) outcome = 'tracked';
   else if (coverage >= TRACKED_PARTIAL) outcome = 'partial';
@@ -357,20 +409,29 @@ function summariseTracking({ samples, tracked, holds, fallbacks, trackedConfiden
   let warning = null;
 
   if (outcome === 'tracked') {
-    headline = `Tracked ${tracked} of ${total} samples · confidence ${pct}%`;
+    headline = `Tracked ${tracked} of ${total} samples`;
   } else if (outcome === 'partial') {
-    headline = `Tracked ${tracked} of ${total} samples · confidence ${pct}%`;
+    headline = `Tracked ${tracked} of ${total} samples`;
     warning = `Smart Reframe could only follow the subject for ${Math.round(coverage * 100)}% of this clip; ` +
       'the rest holds the last good position.';
   } else {
     headline = `Tracked ${tracked} of ${total} samples`;
-    warning = 'The subject could not be tracked reliably, so centre framing was used.';
+    warning = 'Subject could not be tracked reliably. Centre framing was used for most of the clip.';
   }
 
+  // A confidence is only meaningful where something was tracked, and a
+  // failure must never carry one.
+  if (outcome !== 'centred') headline += ` · confidence ${pct}%`;
+
+  // The detail line names the signals in the order they contributed, so
+  // "30 face · 6 person" cannot appear for a run that was mostly saliency.
   const detail = [];
-  if (scenes > 1) detail.push(`${scenes} scenes`);
-  if (held > 0) detail.push(`${held} held near the previous crop`);
+  if (faceSamples) detail.push(`${faceSamples} face`);
+  if (personSamples) detail.push(`${personSamples} person`);
+  if (saliencySamples) detail.push(`${saliencySamples} saliency`);
+  if (held > 0) detail.push(`${held} held`);
   if (centred > 0) detail.push(`${centred} centred`);
+  if (scenes > 1) detail.push(`${scenes} scenes`);
 
   return {
     outcome,
@@ -380,7 +441,22 @@ function summariseTracking({ samples, tracked, holds, fallbacks, trackedConfiden
     centred,
     coverage: Math.round(coverage * 1000) / 1000,
     confidence: Math.round(confidence * 1000) / 1000,
+    trackingConfidence: Math.round(confidence * 1000) / 1000,
     scenes,
+
+    semanticSamples,
+    faceSamples,
+    personSamples,
+    saliencySamples,
+    semanticAvailable: !!semanticAvailable,
+
+    primaryBackend: backend.id,
+    primaryBackendLabel: backend.label,
+    backendUsage: {
+      face: faceSamples, person: personSamples, saliency: saliencySamples,
+      hold: held, centre: centred
+    },
+
     headline,
     detail,
     warning
@@ -395,9 +471,17 @@ function summariseTracking({ samples, tracked, holds, fallbacks, trackedConfiden
  */
 async function analyseSubject({
   ffmpeg, input, headers = null, startSeconds = 0, durationSeconds,
-  cuts = [], profile = 'auto', targetAspect, sourceAspect, control = null
+  cuts = [], profile = 'auto', targetAspect, sourceAspect, control = null,
+  /**
+   * Where the semantic models live, or null to skip semantic entirely.
+   * Absent, unreadable or broken means saliency - never a failed export.
+   */
+  semanticModelsDir = null,
+  semanticEnabled = true
 }) {
   const notes = [];
+
+  /* ---- 1. saliency grid: the canonical sample timeline ---- */
   const frames = await sampleGrid({ ffmpeg, input, headers, startSeconds, durationSeconds, control });
   if (!frames.length) {
     throw new VisionanceError(CODES.STAGE_FAILED, {
@@ -409,14 +493,22 @@ async function analyseSubject({
   let prev = null;
   for (let i = 0; i < frames.length; i++) {
     const { center, confidence } = locateSubject(frames[i], prev);
-    samples.push({ time: i / SAMPLE_FPS, center, confidence });
+    samples.push({ time: i / SAMPLE_FPS, center, confidence, source: 'saliency' });
     prev = frames[i];
   }
 
-  const trajectory = buildTrajectory({ samples, cuts, profile });
-
-  // How wide the crop window is, as a fraction of the source width.
   const cropWidthFraction = Math.min(1, (targetAspect / sourceAspect));
+
+  /* ---- 2. semantic layer, above the saliency it does not replace ---- */
+  const semanticResult = await runSemanticLayer({
+    ffmpeg, input, headers, startSeconds, durationSeconds, control,
+    profile, cuts, samples, cropWidthFraction,
+    modelsDir: semanticEnabled ? semanticModelsDir : null,
+    notes
+  });
+
+  /* ---- 3. trajectory from whatever each sample ended up trusting ---- */
+  const trajectory = buildTrajectory({ samples, cuts, profile });
 
   const summary = summariseTracking({
     samples: samples.length,
@@ -424,36 +516,172 @@ async function analyseSubject({
     holds: trajectory.holds,
     fallbacks: trajectory.fallbacks,
     trackedConfidence: trajectory.trackedConfidence,
-    cuts: cuts.length
+    cuts: cuts.length,
+    usage: trajectory.usage,
+    semanticAvailable: semanticResult.available
   });
 
-  // The single source of truth for what to say about this run.
   if (summary.warning) notes.push(summary.warning);
 
   log.info('subject analysis', {
     outcome: summary.outcome,
+    backend: summary.primaryBackend,
     samples: summary.samples,
     tracked: summary.tracked,
+    face: summary.faceSamples,
+    person: summary.personSamples,
+    saliency: summary.saliencySamples,
     held: summary.held,
     centred: summary.centred,
-    coverage: summary.coverage,
-    confidence: summary.confidence,
-    scenes: summary.scenes
+    scenes: summary.scenes,
+    semanticMs: semanticResult.ms,
+    semanticFrames: semanticResult.frames
   });
 
   return {
-    backend: TRACKER_BACKENDS.saliency.id,
-    backendLabel: TRACKER_BACKENDS.saliency.label,
+    backend: summary.primaryBackend,
+    backendLabel: summary.primaryBackendLabel,
     points: trajectory.points,
     sampleFps: SAMPLE_FPS,
     cropWidthFraction,
-    // Raw counters, kept for the log and for tests.
     fallbacks: trajectory.fallbacks,
     holds: trajectory.holds,
-    // The reconciled view everything user-facing reads.
+    semantic: semanticResult,
     ...summary,
     notes
   };
+}
+
+/**
+ * Run face/person detection over the clip and write the results back onto the
+ * saliency samples in place.
+ *
+ * Returns rather than throws on every failure path. Semantic tracking is an
+ * improvement to a working feature, not a new dependency of it: a missing
+ * runtime, a missing model, a load failure or an inference error all end with
+ * the saliency samples untouched and a note the user can read.
+ */
+async function runSemanticLayer({
+  ffmpeg, input, headers, startSeconds, durationSeconds, control,
+  profile, cuts, samples, cropWidthFraction, modelsDir, notes
+}) {
+  const result = {
+    available: false, attempted: false, frames: 0, ms: 0,
+    faces: 0, persons: 0, reason: null, backend: null
+  };
+  if (!modelsDir) {
+    result.reason = 'disabled';
+    return result;
+  }
+
+  // Required lazily so a build without the optional runtime still loads this
+  // module - the whole point of the fallback chain.
+  let detector;
+  let subjectTrack;
+  try {
+    // eslint-disable-next-line global-require
+    detector = require('./detector');
+    // eslint-disable-next-line global-require
+    subjectTrack = require('./subject-track');
+  } catch (err) {
+    result.reason = 'detector unavailable (' + err.message + ')';
+    notes.push('Semantic subject detection is unavailable; motion and detail tracking was used.');
+    return result;
+  }
+
+  const probe = detector.probe(modelsDir);
+  if (!probe.ready) {
+    result.reason = probe.runtime
+      ? 'models missing: ' + probe.missingModels.join(', ')
+      : 'runtime unavailable: ' + probe.runtimeError;
+    notes.push(
+      probe.runtime
+        ? 'The face and person models are not installed, so motion and detail tracking was used.'
+        : 'The semantic detection runtime is unavailable, so motion and detail tracking was used.'
+    );
+    return result;
+  }
+
+  result.attempted = true;
+  const started = Date.now();
+  const engine = new detector.SemanticDetector({ modelsDir });
+
+  let loaded = false;
+  try {
+    loaded = await engine.load();
+  } catch (err) {
+    result.reason = 'load failed (' + err.message + ')';
+  }
+  if (!loaded) {
+    result.reason = result.reason || engine.error || 'load failed';
+    notes.push('Semantic subject detection could not start; motion and detail tracking was used.');
+    engine.dispose();
+    return result;
+  }
+
+  const plan = subjectTrack.planSemanticSampling(durationSeconds || (samples.length / SAMPLE_FPS));
+  const tracker = new subjectTrack.SubjectTracker({ profile });
+  const cutTimes = [...cuts].sort((a, b) => a - b);
+  let nextCut = 0;
+  let lastTime = 0;
+
+  try {
+    // eslint-disable-next-line global-require
+    const { streamSemanticFrames } = require('./semantic-samples');
+    const stream = await streamSemanticFrames({
+      ffmpeg, input, headers, startSeconds, durationSeconds, control,
+      intervalSeconds: plan.intervalSeconds,
+      onFrame: async (rgb, index, time) => {
+        // A hard cut invalidates identity: do not glide the previous shot's
+        // subject into the next one.
+        while (nextCut < cutTimes.length && cutTimes[nextCut] <= time) {
+          if (cutTimes[nextCut] > lastTime) tracker.reset();
+          nextCut++;
+        }
+        lastTime = time;
+
+        const found = await engine.detect(rgb);
+        result.faces += found.faces.length;
+        result.persons += found.persons.length;
+
+        const elected = tracker.observe({ time, faces: found.faces, persons: found.persons });
+        if (!elected.subject || !elected.source) return;
+
+        const composed = tracker.compose(elected.subject, cropWidthFraction);
+        if (!composed) return;
+
+        // Write onto the nearest canonical sample. The sampling plan snaps to
+        // the saliency grid precisely so this lands on a real sample rather
+        // than being attributed to one it does not belong to.
+        const slot = Math.round(time * SAMPLE_FPS);
+        const sample = samples[slot];
+        if (!sample) return;
+        sample.center = composed.x;
+        // A semantic detection is a far stronger statement than a saliency
+        // centroid, so it enters the trajectory with high confidence and is
+        // labelled with the signal that produced it.
+        sample.confidence = Math.max(sample.confidence, Math.min(0.99, 0.55 + elected.subject.score * 0.4));
+        sample.source = elected.source;
+        sample.semantic = true;
+      }
+    });
+    result.frames = stream.frames;
+  } catch (err) {
+    if (err && err.code === CODES.CANCELLED) {
+      engine.dispose();
+      throw err;
+    }
+    result.reason = 'inference failed (' + (err && err.message) + ')';
+    notes.push('Semantic subject detection failed part-way; motion and detail tracking covered the rest.');
+  }
+
+  result.ms = Date.now() - started;
+  result.available = true;
+  result.backend = engine.backend;
+  result.inferenceMs = engine.stats.inferenceMs;
+  result.interval = plan.intervalSeconds;
+  engine.dispose();
+  return result;
 }
 
 /**
@@ -511,8 +739,10 @@ function round4(v) {
 
 module.exports = {
   analyseSubject,
+  runSemanticLayer,
   buildTrajectory,
   summariseTracking,
+  primaryBackendFor,
   buildCropExpression,
   locateSubject,
   motionProfileFor,

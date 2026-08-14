@@ -84,6 +84,8 @@ class JobManager extends EventEmitter {
     this.resolveRemote = o.resolveRemote || null;
     /** EngineManager; absent means neural stages simply cannot be planned. */
     this.engines = o.engines || null;
+    /** SemanticManager; absent means Smart Reframe uses saliency only. */
+    this.semantic = o.semantic || null;
     this.concurrency = Math.max(1, Number(o.concurrency) || 1);
 
     /** id -> { control, promise } for jobs currently executing. */
@@ -624,7 +626,10 @@ class JobManager extends EventEmitter {
             profile: recipe.profile || 'auto',
             targetAspect: geometry.canvasWidth / geometry.canvasHeight,
             sourceAspect: (geometry.sourceWidth || 16) / (geometry.sourceHeight || 9),
-            control
+            control,
+            // Null when the models are absent or the runtime will not load,
+            // which degrades Smart Reframe to saliency rather than failing.
+            semanticModelsDir: this.semantic ? this.semantic.readyModelsDir() : null
           });
           const expr = tracking.buildCropExpression(subject);
           reframe = { ...expr, cropWidthFraction: subject.cropWidthFraction };
@@ -639,7 +644,19 @@ class JobManager extends EventEmitter {
             centred: subject.centred,
             coverage: subject.coverage,
             confidence: subject.confidence,
+            trackingConfidence: subject.trackingConfidence,
             scenes: subject.scenes,
+            // Which signal decided what, so the label can never overstate.
+            semanticSamples: subject.semanticSamples,
+            faceSamples: subject.faceSamples,
+            personSamples: subject.personSamples,
+            saliencySamples: subject.saliencySamples,
+            semanticAvailable: subject.semanticAvailable,
+            primaryBackend: subject.primaryBackend,
+            backendUsage: subject.backendUsage,
+            semanticMs: subject.semantic ? subject.semantic.ms : null,
+            semanticFrames: subject.semantic ? subject.semantic.frames : null,
+            semanticReason: subject.semantic ? subject.semantic.reason : null,
             headline: subject.headline,
             detail: subject.detail,
             keyedPositions: expr.points,

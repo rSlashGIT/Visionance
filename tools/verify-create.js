@@ -652,3 +652,77 @@ test('cost: interpolation alone also lifts a job off fast', () => {
   });
   assert.notEqual(cost.class, 'fast');
 });
+
+/* ------------------------------------------------------------------ *
+ * Framing must actually reach the encoder
+ *
+ * A regression found by rendering a real 9:16 short and reading the filter
+ * graph: with `reconstruction.targetResolution` set to the same 1080x1920 the
+ * canvas wanted - which is exactly what the Create panel produces - the graph
+ * came out as
+ *     scale=1080:1920, crop=w=min(iw,ih*0.563)..., scale=1080:1920
+ * The pre-scale squashed 16:9 into 9:16, after which `min(iw, ih*aspect)`
+ * resolves to the full width and the crop is a no-op. Smart Reframe tracked
+ * the subject perfectly and had no effect on the picture.
+ * ------------------------------------------------------------------ */
+
+test('framing: the canvas resample is not done twice', () => {
+  const analysis = {
+    container: {}, video: { width: 1920, height: 1080, nominalFps: 30 },
+    audio: {}, timing: { durationSeconds: 6 },
+    derived: { displayWidth: 1920, displayHeight: 1080, durationSeconds: 6 }
+  };
+  const { recipe } = recipes.sanitize({
+    output: { path: 'o.mp4' },
+    framing: { enabled: true, canvas: '9:16', width: 1080, height: 1920, mode: 'fill', tracking: 'auto' },
+    reconstruction: {
+      enabled: true, mode: 'classical',
+      targetResolution: { mode: 'custom', width: 1080, height: 1920 }
+    }
+  });
+  const g = recipes.resolveOutputGeometry(recipe, analysis);
+
+  // Framing owns the resample, so nothing scales in front of it.
+  assert.equal(g.scaleWidth, 1920, 'the pre-framing scale stays at source width');
+  assert.equal(g.scaleHeight, 1080, 'the pre-framing scale stays at source height');
+  assert.equal(g.requestedWidth, 1080, 'what was asked for is still recorded');
+  assert.equal(g.width, 1080);
+  assert.equal(g.height, 1920);
+});
+
+test('framing: a tracked crop is a real crop, not the whole frame', () => {
+  const { buildVideoGraph } = require(path.join(__dirname, '..', 'src', 'main', 'ffmpeg', 'filters'));
+  const analysis = {
+    container: {}, video: { width: 1920, height: 1080, nominalFps: 30 },
+    audio: {}, timing: { durationSeconds: 6 },
+    derived: { displayWidth: 1920, displayHeight: 1080, durationSeconds: 6 }
+  };
+  const { recipe } = recipes.sanitize({
+    output: { path: 'o.mp4' },
+    framing: { enabled: true, canvas: '9:16', width: 1080, height: 1920, mode: 'fill', tracking: 'auto' },
+    reconstruction: {
+      enabled: true, mode: 'classical',
+      targetResolution: { mode: 'custom', width: 1080, height: 1920 }
+    }
+  });
+  const geometry = recipes.resolveOutputGeometry(recipe, analysis);
+  // Signature is (recipe, geometry, analysis, opts).
+  const graph = buildVideoGraph(recipe, geometry, analysis, {
+    availableFilters: new Set(['scale', 'crop', 'gblur']),
+    reframe: { expr: 'iw*0.6746', cropWidthFraction: 0.5625, points: 12, static: false }
+  });
+  const text = typeof graph === 'string' ? graph : (graph.graph || graph.filter || JSON.stringify(graph));
+  assert.ok(text && text.length, 'a graph was produced');
+
+  assert.match(text, /crop=/, 'a crop is present');
+  // The crop must not be preceded by a scale to the canvas: that is the bug.
+  const cropAt = text.indexOf('crop=');
+  const before = text.slice(0, cropAt);
+  assert.doesNotMatch(before, /scale=1080:1920/,
+    `nothing may scale to the canvas before the crop: ${before}`);
+
+  // And with a 16:9 source the crop width is genuinely narrower than the frame.
+  const cropWidth = Math.min(1920, 1080 * (1080 / 1920));
+  assert.ok(cropWidth < 1920 * 0.95,
+    `the crop should be much narrower than the source, computed ${cropWidth}`);
+});

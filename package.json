@@ -15,11 +15,15 @@
     "verify:core": "node --test tools/verify-core.js",
     "verify:watch": "node --test tools/verify-watch.js",
     "verify:create": "node --test tools/verify-create.js",
+    "verify:reframe": "node --test tools/verify-reframe.js",
     "verify:switch": "electron tools/verify-switch.js",
     "verify:gl": "electron tools/verify-electron.js",
     "verify:export": "node tools/verify-export.js",
     "verify:app": "electron tools/smoke.js",
-    "verify": "npm run verify:core && npm run verify:watch && npm run verify:create && npm run verify:gl && npm run verify:export && npm run verify:ai && npm run verify:creator && npm run verify:switch && npm run verify:app",
+    "verify:ui": "electron tools/verify-ui.js",
+    "verify:seek": "electron tools/verify-seek.js",
+    "verify:chrome": "electron tools/verify-chrome.js",
+    "verify": "npm run verify:core && npm run verify:watch && npm run verify:create && npm run verify:reframe && npm run verify:gl && npm run verify:export && npm run verify:ai && npm run verify:creator && npm run verify:switch && npm run verify:app && npm run verify:ui && npm run verify:seek && npm run verify:chrome",
     "launch": "node tools/launcher.js",
     "stop": "node tools/launcher.js --stop",
     "doctor": "node tools/launcher.js --doctor",
@@ -40,7 +44,8 @@
   "license": "MIT",
   "dependencies": {
     "ffmpeg-static": "^5.2.0",
-    "ffprobe-static": "^3.1.0"
+    "ffprobe-static": "^3.1.0",
+    "onnxruntime-node": "^1.27.0"
   },
   "devDependencies": {
     "electron": "^43.2.0",
@@ -53,11 +58,18 @@
       "src/**/*",
       "assets/**/*",
       "!_legacy/**/*",
-      "!videos/**/*"
+      "!videos/**/*",
+      "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/linux/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/x64/DirectML.dll",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxcompiler.dll",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/x64/dxil.dll"
     ],
     "asarUnpack": [
       "node_modules/ffmpeg-static/**",
-      "node_modules/ffprobe-static/**"
+      "node_modules/ffprobe-static/**",
+      "node_modules/onnxruntime-node/**"
     ],
     "extraResources": [
       {

@@ -38,7 +38,12 @@
       // The top bar is the window's title bar now, so the file action is an
       // icon beside the other shell controls rather than a labelled button
       // competing with the workspace navigation.
-      openFileBtn: ICONS.folder
+      openFileBtn: ICONS.folder,
+      // Create's preview transport uses the same icon set, so the two players
+      // read as the same instrument at different jobs.
+      createPlayBtn: ICONS.play,
+      createMuteBtn: ICONS.volume,
+      createFullscreenBtn: ICONS.fullscreen
     };
     for (const [id, icon] of Object.entries(map)) {
       if (el[id]) el[id].innerHTML = icon;
@@ -191,7 +196,15 @@
     'queueActive', 'queueActiveTag', 'queueStorage',
     // Create as the starting workspace: its state strip and its own recents
     // intake. Both are readouts of the job map and the recents list.
-    'createHomeStats', 'createRecents', 'createRecentsTag'
+    'createHomeStats', 'createRecents', 'createRecentsTag',
+    // Create's own preview player: a separate element, transport and empty
+    // state, sharing the stage's geometry and nothing else.
+    'createVideo', 'createAudio', 'createEmpty', 'createPreviewBadge',
+    'createPreviewError', 'createPreviewErrorText', 'createPreviewTag',
+    'createTransport', 'createScrub', 'createScrubBuffered', 'createScrubPlayed',
+    'createScrubKnob', 'createPlayBtn', 'createMuteBtn', 'createVolume',
+    'createTimeLabel', 'createFullscreenBtn',
+    'createEmptyOpenBtn', 'createEmptyWatchBtn'
   ].forEach((id) => { el[id] = $(id); });
 
   /* ------------------------------------------------------------------ *
@@ -456,6 +469,11 @@
   }
 
   /** Structured backend failures: say what happened and what to do about it. */
+  /** The same message reportFailure would toast, for callers that show it in place. */
+  function describeFailure(res, fallback) {
+    return (res && (res.message || res.error)) || fallback || 'Something went wrong.';
+  }
+
   function reportFailure(res, fallback) {
     const message = (res && (res.message || res.error)) || fallback || 'Something went wrong.';
     const action = res && res.suggestedAction;
@@ -1199,6 +1217,9 @@
 
   function scrubPositionFromEvent(e) {
     const rect = el.scrub.getBoundingClientRect();
+    // A track with no width — the transport is not the visible one right now —
+    // would divide by zero and hand `currentTime` a NaN, which throws.
+    if (!rect.width) return null;
     return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
   }
 
@@ -1264,6 +1285,7 @@
     // Scrubbing
     const onScrubMove = (e) => {
       const p = scrubPositionFromEvent(e);
+      if (p === null) return;
       const d = el.video.duration || 0;
       el.scrubTooltip.textContent = fmtTime(p * d);
       el.scrubTooltip.style.left = (p * 100) + '%';
@@ -1282,7 +1304,8 @@
       if (!state.scrubbing) return;
       state.scrubbing = false;
       const d = el.video.duration || 0;
-      if (d) media.seek(scrubPositionFromEvent(e) * d);
+      const p = scrubPositionFromEvent(e);
+      if (d && p !== null) media.seek(p * d);
     });
 
     // Media element events
@@ -1626,6 +1649,206 @@
     };
   }
 
+  /* ------------------------------------------------------------------ *
+   * Create's preview player
+   *
+   * Its own native element, its own stream session, its own generation
+   * counter. It shows the descriptor Create is aimed at without ever becoming
+   * that descriptor: `state.createSource` remains the render identity, and
+   * nothing in here writes to it. Playing, seeking or failing the preview
+   * cannot change what a queued job renders.
+   *
+   * Deliberately no WebGL and no enhancement — the offline pipeline is what
+   * applies those, and a live approximation of a render is a lie.
+   * ------------------------------------------------------------------ */
+
+  const createPreview = {
+    generation: 0,
+    /** The stream session Create owns. Never Watch's. */
+    token: null,
+    /** Which source is on the element, so an unchanged source is not re-resolved. */
+    key: null,
+    lastPosition: 0,
+
+    /** Identity of a snapshot, for the "nothing changed" check. */
+    keyFor(snapshot) {
+      if (!snapshot) return null;
+      return `${snapshot.kind}:${(snapshot.source || '').toLowerCase()}`;
+    },
+
+    /** Drop the session Create is holding, if any. Best effort by design. */
+    releaseSession() {
+      if (!this.token) return;
+      const token = this.token;
+      this.token = null;
+      api.media.releaseStream(token).catch(() => { /* it expires on its own */ });
+    },
+
+    /** Tear the element down without touching Watch. */
+    detach() {
+      const v = el.createVideo;
+      const a = el.createAudio;
+      for (const element of [v, a]) {
+        try { element.pause(); } catch { /* not loaded */ }
+        element.removeAttribute('src');
+        try { element.load(); } catch { /* nothing to abort */ }
+      }
+      v.classList.remove('is-ready');
+      this.key = null;
+      this.lastPosition = 0;
+      this.releaseSession();
+    },
+
+    setStatus({ ready = false, error = null, tag = '' } = {}) {
+      el.createVideo.classList.toggle('is-ready', !!ready);
+      el.createEmpty.hidden = ready || !!error || !!state.createSource;
+      el.createPreviewError.hidden = !error;
+      el.createPreviewBadge.hidden = !ready;
+      if (error) el.createPreviewErrorText.textContent = error;
+      el.createPreviewTag.textContent = tag;
+    },
+
+    /**
+     * Point the preview at a Create source.
+     *
+     * Generation-guarded the way `switchSource()` is: selecting B and then C
+     * before B resolves must leave C on screen, and B's late resolution must
+     * release its own session and then do nothing.
+     */
+    async show(snapshot) {
+      const generation = ++this.generation;
+      const stale = () => generation !== this.generation;
+
+      if (!snapshot) {
+        this.detach();
+        this.setStatus({});
+        return;
+      }
+
+      // Same source, still loaded: keep the position rather than restart it.
+      if (this.key && this.key === this.keyFor(snapshot) && el.createVideo.getAttribute('src')) {
+        this.setStatus({ ready: true, tag: this.tagFor(snapshot) });
+        return;
+      }
+
+      this.detach();
+      this.setStatus({ tag: 'Loading…' });
+      el.createEmpty.hidden = true;
+
+      let videoUrl = null;
+      let audioUrl = null;
+
+      if (snapshot.kind === 'stream') {
+        // Create resolves its own session. Watch's token is never reused: a
+        // render that outlives the Watch tab must not depend on it, and
+        // releasing one must never disturb the other.
+        const res = await api.media.resolveUrl(snapshot.webpageUrl || snapshot.source, {
+          watchQuality: 'balanced'
+        });
+        if (stale()) {
+          if (res.ok && res.streamToken) api.media.releaseStream(res.streamToken).catch(() => {});
+          return;
+        }
+        if (!res.ok) {
+          this.setStatus({ error: describeFailure(res), tag: 'Unavailable' });
+          return;
+        }
+        this.token = res.streamToken || null;
+        videoUrl = res.playbackUrl;
+        audioUrl = res.audioUrl || null;
+      } else {
+        videoUrl = `vs://app/__media?src=local&p=${encodeURIComponent(snapshot.source)}`;
+      }
+
+      if (stale()) { this.releaseSession(); return; }
+
+      const v = el.createVideo;
+      const a = el.createAudio;
+      v.muted = !!state.settings.muted;
+      v.volume = state.settings.volume ?? 1;
+
+      if (audioUrl) {
+        // Split stream: the same arrangement Watch uses, and the same hazard.
+        v.muted = true;
+        a.src = audioUrl;
+        a.muted = !!state.settings.muted;
+        a.volume = state.settings.volume ?? 1;
+      }
+      v.src = videoUrl;
+      v.load();
+
+      this.key = this.keyFor(snapshot);
+      this.setStatus({ ready: true, tag: this.tagFor(snapshot) });
+    },
+
+    tagFor(snapshot) {
+      if (!snapshot) return '';
+      return snapshot.kind === 'stream' ? 'Online source' : 'Local source';
+    },
+
+    /**
+     * A split preview whose audio leg died.
+     *
+     * Same lesson as Watch, applied independently rather than shared: the
+     * picture is what a Create preview is for, so a refused audio track drops
+     * the preview to video-only instead of taking the frame down with it.
+     */
+    recoverFromAudioFailure() {
+      const a = el.createAudio;
+      if (!a.getAttribute('src') || !a.error) return;
+      a.pause();
+      a.removeAttribute('src');
+      try { a.load(); } catch { /* nothing to abort */ }
+      el.createVideo.muted = !!state.settings.muted;
+      toast('The preview’s audio track was refused, so it is previewing without ' +
+        'sound. This does not affect the render.', 'warn', 8000);
+    },
+
+    play() {
+      // One audible player at a time. This arbitrates transport only — neither
+      // side's *source* is touched, which is the independence that matters.
+      if (!el.video.paused) media.pause();
+      const p = el.createVideo.play();
+      if (p && p.catch) p.catch(() => { /* reported by the element's error event */ });
+      if (el.createAudio.getAttribute('src') && !el.createAudio.error) {
+        el.createAudio.currentTime = el.createVideo.currentTime;
+        const ap = el.createAudio.play();
+        if (ap && ap.catch) ap.catch(() => {});
+      }
+    },
+
+    pause() {
+      try { el.createVideo.pause(); } catch { /* not loaded */ }
+      try { el.createAudio.pause(); } catch { /* not loaded */ }
+    },
+
+    toggle() { if (el.createVideo.paused) this.play(); else this.pause(); },
+
+    seek(seconds) {
+      const v = el.createVideo;
+      const d = v.duration;
+      if (!Number.isFinite(seconds)) return;
+      const t = Math.max(0, Math.min(Number.isFinite(d) ? d - 0.05 : seconds, seconds));
+      v.currentTime = t;
+      if (el.createAudio.getAttribute('src') && !el.createAudio.error) {
+        el.createAudio.currentTime = t;
+      }
+    },
+
+    /** Nothing decodes behind another workspace. */
+    onWorkspaceChange(name) {
+      if (name === 'create') {
+        // `show(null)` is what paints the empty state, so it runs whether or
+        // not there is a source: otherwise opening Create with nothing chosen
+        // leaves the markup's initial `hidden` in place and the stage is bare.
+        this.show(state.createSource);
+        return;
+      }
+      if (!el.createVideo.paused) this.lastPosition = el.createVideo.currentTime;
+      this.pause();
+    }
+  };
+
   async function setCreateSource(snapshot) {
     state.createSource = snapshot;
     state.createAnalysis = (snapshot && snapshot.analysis) || null;
@@ -1635,6 +1858,10 @@
     refreshCreateSource();
     syncGeometryUi();
     schedulePreview();
+    // The preview follows the render identity; it never sets it. Loading only
+    // while Create is on screen keeps a background workspace from decoding.
+    if (state.workspace === 'create') createPreview.show(snapshot);
+    else createPreview.detach();
   }
 
   async function createOpenFile() {
@@ -4548,6 +4775,7 @@
 
     if (name === 'create' || name === 'presets') refreshUtilityStrip();
     if (name === 'create') refreshCreateHome();
+    createPreview.onWorkspaceChange(name);
     if (name === 'presets') refreshWatchSurfaces();
     if (name === 'library') refreshLibrarySummary();
     if (name === 'queue') refreshQueueSide();
@@ -4600,6 +4828,105 @@
     el.popoverStatsState.textContent = el.statsOverlay.hidden ? 'Off' : 'On';
     el.speedSelect.value = String(el.video.playbackRate || 1);
     el.loopToggle.checked = !!el.video.loop;
+  }
+
+  /**
+   * Create's preview transport.
+   *
+   * Wired only to Create's own element. Nothing here can reach Watch's media
+   * state, which is what keeps the two workspaces independent by construction
+   * rather than by discipline.
+   */
+  function bindCreatePreview() {
+    const v = el.createVideo;
+
+    el.createPlayBtn.addEventListener('click', () => createPreview.toggle());
+    el.createVideo.addEventListener('click', () => createPreview.toggle());
+
+    el.createMuteBtn.addEventListener('click', () => {
+      const target = el.createAudio.getAttribute('src') && !el.createAudio.error
+        ? el.createAudio : v;
+      target.muted = !target.muted;
+      updateCreateMuteIcon();
+    });
+    el.createVolume.addEventListener('input', () => {
+      const vol = parseFloat(el.createVolume.value);
+      const target = el.createAudio.getAttribute('src') && !el.createAudio.error
+        ? el.createAudio : v;
+      target.volume = vol;
+      target.muted = vol === 0;
+      updateCreateMuteIcon();
+    });
+
+    el.createFullscreenBtn.addEventListener('click', () => {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else v.requestFullscreen().catch(() => {});
+    });
+
+    const seekFromEvent = (e) => {
+      const rect = el.createScrub.getBoundingClientRect();
+      if (!rect.width) return;
+      const p = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const d = v.duration;
+      if (Number.isFinite(d) && d > 0) createPreview.seek(p * d);
+    };
+    el.createScrub.addEventListener('mousedown', (e) => {
+      seekFromEvent(e);
+      const move = (ev) => seekFromEvent(ev);
+      const up = () => {
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', up);
+      };
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+    });
+
+    for (const event of ['timeupdate', 'progress', 'durationchange', 'loadedmetadata']) {
+      v.addEventListener(event, updateCreateTime);
+    }
+    v.addEventListener('play', () => { el.createPlayBtn.innerHTML = ICONS.pause; });
+    v.addEventListener('pause', () => {
+      el.createPlayBtn.innerHTML = ICONS.play;
+      try { el.createAudio.pause(); } catch { /* not loaded */ }
+    });
+    v.addEventListener('seeking', () => {
+      if (el.createAudio.getAttribute('src') && !el.createAudio.error) {
+        el.createAudio.currentTime = v.currentTime;
+      }
+    });
+    // A preview that cannot decode says why, rather than leaving a black box.
+    v.addEventListener('error', () => {
+      const code = v.error && v.error.code;
+      createPreview.setStatus({
+        error: MEDIA_ERRORS[code] || 'This source could not be decoded for preview.',
+        tag: 'Unavailable'
+      });
+    });
+    el.createAudio.addEventListener('error', () => createPreview.recoverFromAudioFailure());
+
+    el.createEmptyOpenBtn.addEventListener('click', createOpenFile);
+    el.createEmptyWatchBtn.addEventListener('click', createUseWatchSource);
+  }
+
+  function updateCreateTime() {
+    const v = el.createVideo;
+    const d = Number.isFinite(v.duration) ? v.duration : 0;
+    el.createTimeLabel.textContent = `${fmtTime(v.currentTime)} / ${fmtTime(d)}`;
+    const pct = d > 0 ? (v.currentTime / d) * 100 : 0;
+    el.createScrubPlayed.style.width = `${pct}%`;
+    el.createScrubKnob.style.left = `${pct}%`;
+    if (v.buffered.length) {
+      const end = v.buffered.end(v.buffered.length - 1);
+      el.createScrubBuffered.style.width = `${d > 0 ? (end / d) * 100 : 0}%`;
+    }
+  }
+
+  function updateCreateMuteIcon() {
+    const target = el.createAudio.getAttribute('src') && !el.createAudio.error
+      ? el.createAudio : el.createVideo;
+    el.createMuteBtn.innerHTML = target.muted || target.volume === 0
+      ? ICONS.mute : ICONS.volume;
+    el.createVolume.value = String(target.muted ? 0 : target.volume);
   }
 
   function bindConsole() {
@@ -4980,6 +5307,11 @@
     bindPlayerSettings();
     bindGlobal();
     bindConsole();
+    bindCreatePreview();
+    // The preview's session is Create's to release. Watch's own teardown does
+    // not know about it, and an abandoned session would sit in the registry
+    // until it expired.
+    window.addEventListener('beforeunload', () => createPreview.releaseSession());
     bindIdle();
     applyWindowChrome();
 

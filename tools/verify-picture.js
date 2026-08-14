@@ -241,17 +241,26 @@ async function run() {
 
   const onLoad = await js(PROBE);
   note(`first load (opened on ${openedOn}): ${JSON.stringify(onLoad)}`);
-  check('opening a source needs no tab switch to present a picture',
-    onLoad.stageEmptyHidden &&
-    (onLoad.presentation === 'native'
-      ? onLoad.canvasDisplay === 'none' && onLoad.videoOpacity === '1'
-      : onLoad.canvasDisplay !== 'none' && onLoad.engineRunning === true),
-    JSON.stringify({ presentation: onLoad.presentation, canvas: onLoad.canvasDisplay,
-      engine: onLoad.engineRunning, videoOpacity: onLoad.videoOpacity }));
+  // The app opens on Create, which shows its own preview rather than Watch's
+  // viewer, so what has to be true here is that the source was taken up at all
+  // and the empty state stood down. Watch's own presentation is asserted the
+  // moment we arrive there, below — without a detour through a third
+  // workspace, which is the regression this guards.
+  check('opening a source is taken up without a tab switch',
+    onLoad.stageEmptyHidden && onLoad.readyState >= 2 && onLoad.w > 0,
+    JSON.stringify({ empty: onLoad.stageEmptyHidden, ready: onLoad.readyState,
+      w: onLoad.w, workspace: openedOn }));
 
   // The player is on Watch; go there so the viewer is composited.
   await js(`document.querySelector('.tab[data-tab="presets"]').click(); true`);
-  await sleep(500);
+  await sleep(700);
+  const onArrival = await js(PROBE);
+  check('arriving on Watch presents the picture immediately',
+    onArrival.presentation === 'native'
+      ? onArrival.canvasDisplay === 'none' && onArrival.videoOpacity === '1'
+      : onArrival.canvasDisplay !== 'none' && onArrival.engineRunning === true,
+    JSON.stringify({ presentation: onArrival.presentation,
+      canvas: onArrival.canvasDisplay, engine: onArrival.engineRunning }));
 
   /* ---- A. local, enhancement OFF ---- */
 

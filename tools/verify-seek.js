@@ -196,6 +196,10 @@ async function run() {
   /* ---- the scrubber, as a user drives it ------------------------------- */
 
   await js(`document.getElementById('video').pause(); true`);
+  // The transport belongs to Watch and is not rendered in Create, which is the
+  // workspace the app opens on. A collapsed track has no width to read.
+  await js(`document.querySelector('.tab[data-tab="presets"]').click(); true`);
+  await sleep(500);
   const scrub = await js(`(() => {
     const el = document.getElementById('scrub');
     const r = el.getBoundingClientRect();

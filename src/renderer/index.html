@@ -139,6 +139,44 @@
         <video id="video" playsinline preload="auto"></video>
         <audio id="audio" preload="auto"></audio>
 
+        <!-- ───────────── Create's own preview ──────────────────────────────
+             A second, entirely separate native player. Create's source is a
+             descriptor, never Watch's media object, and this keeps that true
+             while still showing the user the video they picked: it has its own
+             element, its own stream session and its own generation counter.
+             No WebGL, no enhancement — the render is what applies those. -->
+        <video id="createVideo" playsinline preload="metadata"></video>
+        <audio id="createAudio" preload="auto"></audio>
+
+        <div class="preview-badge" id="createPreviewBadge" hidden>
+          <span>Source preview</span>
+          <em>Final processing is applied during render</em>
+        </div>
+
+        <div class="stage-empty" id="createEmpty" hidden>
+          <div class="empty-art" aria-hidden="true">
+            <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.4">
+              <rect x="4" y="9" width="40" height="30" rx="3"/>
+              <path d="M20 19.5v9l8-4.5z" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <h2>Choose a source to create from</h2>
+          <p>Pick a video, paste a URL, or use whatever Watch is playing. It appears
+             here so you can see exactly what you are about to render. Final
+             processing is applied during the render, not to this preview.</p>
+          <div class="empty-actions">
+            <button class="btn btn-accent" id="createEmptyOpenBtn">Choose video</button>
+            <button class="btn btn-ghost" id="createEmptyWatchBtn">Use Watch source</button>
+          </div>
+        </div>
+
+        <div class="stage-empty preview-failed" id="createPreviewError" hidden>
+          <h2>Preview unavailable</h2>
+          <p id="createPreviewErrorText">This source could not be previewed.</p>
+          <p class="field-help last">The source itself is still valid to render — preview
+             and render use different engines.</p>
+        </div>
+
         <div class="stage-empty" id="stageEmpty">
           <div class="empty-art" aria-hidden="true">
             <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.4">
@@ -176,6 +214,37 @@
       </div>
 
       <!-- ───────────────────── Transport ───────────────────── -->
+      <!-- ───────────── Create's preview transport ────────────────────────
+           Deliberately not Watch's control set: no enhancement toggle, no
+           compare, no looks, no realtime quality. Those are Watch concepts and
+           none of them acts on a render. -->
+      <div class="transport create-transport" id="createTransport">
+        <div class="scrub" id="createScrub" role="slider" tabindex="0"
+             aria-label="Seek preview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div class="scrub-track">
+            <div class="scrub-buffered" id="createScrubBuffered"></div>
+            <div class="scrub-played" id="createScrubPlayed"></div>
+            <div class="scrub-knob" id="createScrubKnob"></div>
+          </div>
+        </div>
+        <div class="transport-row">
+          <div class="tgroup">
+            <button class="icon-btn lg" id="createPlayBtn" title="Play / Pause" aria-label="Play"></button>
+            <div class="volume">
+              <button class="icon-btn" id="createMuteBtn" title="Mute" aria-label="Mute"></button>
+              <input type="range" id="createVolume" min="0" max="1" step="0.01" value="1" aria-label="Preview volume">
+            </div>
+            <span class="time" id="createTimeLabel">0:00 / 0:00</span>
+          </div>
+          <div class="tgroup center">
+            <span class="ps-tag" id="createPreviewTag"></span>
+          </div>
+          <div class="tgroup right">
+            <button class="icon-btn" id="createFullscreenBtn" title="Fullscreen" aria-label="Fullscreen"></button>
+          </div>
+        </div>
+      </div>
+
       <div class="transport" id="transport">
         <div class="scrub" id="scrub" role="slider" tabindex="0"
              aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">

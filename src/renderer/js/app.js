@@ -67,6 +67,10 @@
     splitDragging: false,
     scrubbing: false,
     dualStream: false,
+    // Set once a split stream's audio leg has failed and playback has been
+    // recovered as video-only, so the recovery runs once per source rather
+    // than on every error event the dead element emits.
+    audioLegFailed: false,
     jobs: new Map(),
     analysis: null,        // full source analysis for the loaded media
 
@@ -256,6 +260,7 @@
       const a = el.audio;
 
       state.dualStream = !!descriptor.audioUrl;
+      state.audioLegFailed = false;
       v.pause();
       a.pause();
       a.removeAttribute('src');
@@ -321,6 +326,7 @@
      */
     playAudio() {
       if (!state.dualStream || el.video.paused) return;
+      if (el.audio.error) return media.recoverFromAudioFailure();
       if (Math.abs(el.audio.currentTime - el.video.currentTime) > 0.25) {
         el.audio.currentTime = el.video.currentTime;
       }
@@ -341,22 +347,22 @@
       const d = el.video.duration;
       const t = Math.max(0, Math.min(Number.isFinite(d) ? d - 0.05 : seconds, seconds));
       el.video.currentTime = t;
-      if (state.dualStream) el.audio.currentTime = t;
+      if (state.dualStream && !el.audio.error) el.audio.currentTime = t;
     },
 
     setVolume(vol) {
-      const target = state.dualStream ? el.audio : el.video;
+      const target = state.dualStream && !el.audio.error ? el.audio : el.video;
       target.volume = vol;
       if (vol > 0) target.muted = false;
     },
 
     setMuted(muted) {
-      const target = state.dualStream ? el.audio : el.video;
+      const target = state.dualStream && !el.audio.error ? el.audio : el.video;
       target.muted = muted;
     },
 
     get muted() {
-      return state.dualStream ? el.audio.muted : el.video.muted;
+      return state.dualStream && !el.audio.error ? el.audio.muted : el.video.muted;
     },
 
     setRate(rate) {
@@ -364,9 +370,66 @@
       el.audio.playbackRate = rate;
     },
 
+    /**
+     * Recover a split stream whose audio leg died.
+     *
+     * A site can serve the video format and refuse the audio one — YouTube
+     * returns 403 on the opus URL often enough that it is an ordinary
+     * condition, not an edge case. There was no handling for it at all, and
+     * the result was the worst possible outcome: the `<audio>` element failed
+     * with DEMUXER_ERROR, the video element sat at `seeking: true` forever on
+     * the position the resume restored, and the user got a black picture with
+     * a full inspector and no explanation.
+     *
+     * The video leg is healthy in this situation, so the picture is
+     * recoverable. Drop to a single stream, re-arm the video element — which
+     * is what clears the stuck seek — and say plainly that the sound is
+     * missing rather than pretending nothing happened.
+     */
+    recoverFromAudioFailure() {
+      const v = el.video;
+      const a = el.audio;
+      // Keyed on the element rather than on `dualStream`: "this element was
+      // given a source and that source failed" is the condition that matters,
+      // and it stays true however the split arrangement was arrived at.
+      if (state.audioLegFailed || !a.getAttribute('src') || !a.error) return;
+      state.audioLegFailed = true;
+      state.dualStream = false;
+      const resumeAt = v.currentTime;
+      const wasPlaying = !v.paused;
+
+      a.pause();
+      a.removeAttribute('src');
+      try { a.load(); } catch { /* nothing to abort */ }
+
+      // The video element carries the sound settings again now that nothing
+      // else does, even though a video-only leg has no audible track.
+      v.muted = !!state.settings.muted;
+      v.volume = state.settings.volume ?? 1;
+
+      // Re-arm rather than leave the pipeline in its stuck seek. Restoring the
+      // position afterwards keeps the recovery invisible apart from the sound.
+      const src = v.getAttribute('src');
+      if (src) {
+        const restore = () => {
+          if (Number.isFinite(resumeAt) && resumeAt > 0) {
+            try { v.currentTime = resumeAt; } catch { /* start from the top */ }
+          }
+          if (wasPlaying) media.play();
+        };
+        v.addEventListener('loadedmetadata', restore, { once: true });
+        v.load();
+      }
+
+      toast('This source refused its audio track, so it is playing without sound. ' +
+        'The picture is unaffected.', 'warn', 9000);
+      refreshWatchSurfaces();
+    },
+
     /** Keep the separate audio track locked to the video clock. */
     syncDrift() {
       if (!state.dualStream || el.video.paused) return;
+      if (el.audio.error) return;
       const drift = el.audio.currentTime - el.video.currentTime;
       if (Math.abs(drift) > 0.25) {
         el.audio.currentTime = el.video.currentTime;
@@ -675,6 +738,16 @@
           resolveMs: state.media.resolveMs || null
         } : null
       }),
+      /**
+       * A readback of what is actually on the enhanced canvas.
+       *
+       * The WebGL context runs with `preserveDrawingBuffer: false`, so nothing
+       * outside the engine can read the composited frame after the fact — the
+       * picture harness would see an empty buffer and report black for a
+       * picture that is plainly on screen. This is the same draw-then-read the
+       * Save Frame button uses, and it costs nothing until it is called.
+       */
+      frame: () => (state.engine ? state.engine.snapshot() : null),
       /** Bytes and throughput per leg, straight from the proxy. */
       transfer: () => api.media.transferStats(),
       /** Which source is loaded, and whether a switch is still in flight. */
@@ -1225,10 +1298,16 @@
     for (const event of ['loadeddata', 'canplay', 'canplaythrough']) {
       el.audio.addEventListener(event, () => media.playAudio());
     }
+    // And the moment it gives up is the moment to save the picture. Without
+    // this the element sits errored, the video's seek never completes and the
+    // viewer stays black with everything else looking healthy.
+    el.audio.addEventListener('error', () => media.recoverFromAudioFailure());
     v.addEventListener('timeupdate', () => { updateTime(); updateResBadge(); });
     v.addEventListener('progress', updateTime);
     v.addEventListener('durationchange', updateTime);
-    v.addEventListener('seeking', () => { if (state.dualStream) el.audio.currentTime = v.currentTime; });
+    v.addEventListener('seeking', () => {
+      if (state.dualStream && !el.audio.error) el.audio.currentTime = v.currentTime;
+    });
     v.addEventListener('waiting', () => { if (state.dualStream) el.audio.pause(); });
     v.addEventListener('playing', () => media.playAudio());
     v.addEventListener('ratechange', () => { el.speedSelect.value = String(v.playbackRate); });

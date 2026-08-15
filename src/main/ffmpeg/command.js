@@ -68,11 +68,24 @@ function buildEncodeCommand(o) {
     audioHeaders = null,
     output,
     encoderId,
-    sourceHasAudio = true,
+    sourceHasAudio = undefined,
     segment = null,
     forConcat = false,
     reframe = null
   } = o;
+
+  /*
+   * Whether the *video* input carries an audio track.
+   *
+   * This used to default to `true`, and the failure mode of that optimism is
+   * silent: the graph emits `-map 0:a:0?`, ffmpeg finds no audio in a
+   * video-only rendition, and the render succeeds without sound. Derived from
+   * the analysis the builder is already given, so a caller that says nothing
+   * gets the truth about its own input rather than a hopeful assumption.
+   */
+  const hasAudioInVideo = sourceHasAudio === undefined
+    ? !!(analysis && analysis.audio)
+    : !!sourceHasAudio;
 
   const notes = [];
   const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y'];
@@ -110,7 +123,7 @@ function buildEncodeCommand(o) {
 
   /* ---- audio ---- */
   const wantAudio = recipe.audio.enabled && recipe.audio.mode !== 'none' &&
-    (useSeparateAudio || sourceHasAudio);
+    (useSeparateAudio || hasAudioInVideo);
 
   if (!wantAudio) {
     args.push('-an');

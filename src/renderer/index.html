@@ -679,13 +679,19 @@
 
               <div class="field-row">
                 <label for="createRes">Resolution</label>
+                <!-- Size classes, not fixed pairs.
+                     "2K" used to mean the literal pair 2560×1440, which is a
+                     16:9 shape — choosing it under a 21:9 ratio silently made
+                     the output 16:9. A class names the long edge and the ratio
+                     decides the other one; the labels are rewritten with the
+                     resolved dimensions whenever the ratio changes. -->
                 <select id="createRes" class="select">
                   <option value="auto">Suggested for this ratio</option>
                   <option value="source">Same as source</option>
-                  <option value="1280x720">1280 × 720</option>
-                  <option value="1920x1080">1920 × 1080</option>
-                  <option value="2560x1440">2560 × 1440</option>
-                  <option value="3840x2160">3840 × 2160 (4K)</option>
+                  <option value="long:1280">720p class</option>
+                  <option value="long:1920">1080p class</option>
+                  <option value="long:2560">2K class</option>
+                  <option value="long:3840">4K class</option>
                   <option value="custom">Custom…</option>
                 </select>
               </div>

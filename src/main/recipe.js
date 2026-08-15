@@ -949,8 +949,36 @@ function resolveOutputGeometry(recipe, analysis) {
   let canvasHeight = null;
   if (recipe.framing.enabled) {
     if (recipe.framing.width && recipe.framing.height) {
-      canvasWidth = recipe.framing.width;
-      canvasHeight = recipe.framing.height;
+      /*
+       * The named canvas is the contract; the dimensions are how big.
+       *
+       * These two fields could contradict each other and the dimensions won
+       * silently. A real render asked for 21:9 at "2K" and got 2560x1440 -
+       * because 2560x1440 is a 16:9 pair, it was written into a 21:9 framing
+       * block, and this branch handed it straight to the encoder. The file was
+       * genuinely 16:9, DAR 16:9, and every downstream stage - including
+       * verification - believed 16:9 was what had been asked for.
+       *
+       * A ratio the user picked from a list cannot be overridden by a
+       * resolution they picked from another list. So the dimensions are
+       * conformed to the ratio, keeping the size the user asked for on the
+       * long edge, and `canvasConformed` records that it happened so the UI
+       * and the verifier can both see it.
+       */
+      const ratio = aspectRatioOf(recipe.framing.canvas, recipe.framing);
+      const asked = recipe.framing.width / recipe.framing.height;
+      if (ratio && Math.abs(asked - ratio) > 0.01) {
+        if (ratio >= 1) {
+          canvasWidth = evenDim(Math.max(recipe.framing.width, recipe.framing.height));
+          canvasHeight = evenDim(canvasWidth / ratio);
+        } else {
+          canvasHeight = evenDim(Math.max(recipe.framing.width, recipe.framing.height));
+          canvasWidth = evenDim(canvasHeight * ratio);
+        }
+      } else {
+        canvasWidth = recipe.framing.width;
+        canvasHeight = recipe.framing.height;
+      }
     } else if (recipe.framing.canvas !== 'source' && width && height) {
       const aspect = aspectRatioOf(recipe.framing.canvas, recipe.framing);
       if (aspect) {

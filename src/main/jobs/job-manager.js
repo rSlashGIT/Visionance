@@ -41,7 +41,8 @@ const scenes = require('../ai/scenes');
 const { freeSpaceBytes } = require('../ai/downloads');
 
 const recipes = require('../recipe');
-const { analyze } = require('../media-analyzer');
+const analyzer = require('../media-analyzer');
+const { analyze } = analyzer;
 const { chooseEncoder, detectEncoders } = require('../ffmpeg/encoders');
 const { detectFilters, detectGpus } = require('../capabilities');
 const { VisionanceError, CODES, toStructured } = require('../errors');
@@ -461,12 +462,35 @@ class JobManager extends EventEmitter {
       const inputs = await this._resolveInputs(job);
       if (control.cancelled) throw new VisionanceError(CODES.CANCELLED);
 
-      /* ---- analysis ---- */
-      const analysis = await analyze(bins.ffprobe, inputs.video, {
-        headers: inputs.headers.video,
-        deep: inputs.isLocal,
-        includeRaw: false
-      });
+      /* ---- analysis ----
+       *
+       * The probe is the best answer, not the only acceptable one. A site can
+       * serve the stream and refuse ffprobe's request for it — measured
+       * against YouTube, the resolve succeeds and the probe returns
+       * PROBE_FAILED in a few hundred milliseconds. Failing the whole render
+       * there throws away every fact the resolver already reported about the
+       * exact rendition being rendered.
+       *
+       * A local file has no such excuse and still fails hard.
+       */
+      let analysis;
+      try {
+        analysis = await analyze(bins.ffprobe, inputs.video, {
+          headers: inputs.headers.video,
+          deep: inputs.isLocal,
+          includeRaw: false
+        });
+      } catch (err) {
+        const declared = inputs.isLocal ? null : analyzer.analysisFromDeclared(inputs.declared);
+        if (!declared) throw err;
+        analysis = declared;
+        job.warnings = addWarning(job.warnings,
+          'This stream could not be probed directly, so the render used the figures the site ' +
+          'declares for the rendition it selected.');
+        this.log.warn('probe refused; using declared rendition', {
+          job: job.id, error: err && err.message
+        });
+      }
       job.sourceMetadata = compactAnalysis(analysis);
       job.totalDuration = analysis.derived.durationSeconds || 0;
       if (control.cancelled) throw new VisionanceError(CODES.CANCELLED);
@@ -820,7 +844,18 @@ class JobManager extends EventEmitter {
     /* ---- VERIFY ---- */
     if (recipe.processing.verify !== false) {
       const verification = await this._runStage(job, 'VERIFY', (report) =>
-        runVerify({ ...ctx, report, filePath: partFile }));
+        // The contract the job was set up to satisfy travels with the check.
+        // Deriving the expectation inside the verifier from the source
+        // analysis is what let a silent render pass: for a split stream the
+        // analysis sees no audio, so the verifier expected none.
+        runVerify({
+          ...ctx,
+          report,
+          filePath: partFile,
+          expected: job.output.expected,
+          sourceHasAudio: !!(ctx.inputs && ctx.inputs.audio) ||
+            !!(ctx.analysis && ctx.analysis.audio)
+        }));
       if (verification) {
         job.verification = {
           ok: verification.ok,

@@ -26,6 +26,7 @@
     "verify:create-preview": "electron tools/verify-create-preview.js",
     "verify:chrome": "electron tools/verify-chrome.js",
     "verify:auto": "node --test tools/verify-auto.js",
+    "verify:contract": "node --test tools/verify-output-contract.js",
     "verify:auto-ui": "electron tools/verify-auto-ui.js",
     "verify:audio": "electron tools/verify-audio.js",
     "verify:release": "electron tools/verify-release.js",
@@ -35,7 +36,9 @@
     "doctor": "node tools/launcher.js --doctor",
     "verify:ai": "node tools/verify-ai.js",
     "verify:ai:core": "node tools/verify-ai.js --core",
-    "verify:creator": "node tools/verify-creator.js"
+    "verify:creator": "node tools/verify-creator.js",
+    "verify:mux": "node --test tools/verify-mux.js",
+    "verify:temporal": "node --test tools/verify-temporal.js"
   },
   "keywords": [
     "video",

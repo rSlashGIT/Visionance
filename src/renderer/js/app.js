@@ -3597,6 +3597,10 @@
           // It is exactly what the ratio suggests, so leave it on automatic and
           // let a later ratio change move it.
           el.createRes.value = 'auto';
+        } else if (matchingSizeClass(target)) {
+          // A size class that resolves to exactly this, so a later ratio change
+          // still moves it rather than pinning a stale pair.
+          el.createRes.value = matchingSizeClass(target);
         } else if ([...el.createRes.options].some((o) => o.value === wh)) {
           el.createRes.value = wh;
         } else {
@@ -3789,6 +3793,17 @@
         ? `Suggested for this ratio — ${suggestion.width} × ${suggestion.height}`
         : 'Suggested for this ratio';
     }
+    // Every class states the dimensions it resolves to under the current
+    // ratio, so "2K" can never again be read as one fixed 16:9 pair.
+    const CLASS_LABEL = { 1280: '720p class', 1920: '1080p class', 2560: '2K class', 3840: '4K class' };
+    for (const option of el.createRes.options) {
+      if (!option.value.startsWith('long:')) continue;
+      const longEdge = Number(option.value.slice(5));
+      const size = sizeForClass(longEdge, aspect);
+      option.textContent = size
+        ? `${CLASS_LABEL[longEdge]} — ${size.width} × ${size.height}`
+        : CLASS_LABEL[longEdge];
+    }
 
     const notes = [];
     const srcInfo = state.createAnalysis && state.createAnalysis.video;
@@ -3801,10 +3816,19 @@
       if (aspect) {
         const actual = resolved.width / resolved.height;
         if (Math.abs(actual - aspect.ratio) > 0.02) {
-          // Never silently stretch: say what will happen instead.
+          /*
+           * Only a hand-typed custom size can still disagree with the ratio,
+           * because the classes derive from it. The ratio wins — it is the
+           * thing the user chose from a list of shapes — and this says so
+           * rather than letting the two settings fight silently, which is
+           * exactly how a 21:9 render came out 16:9.
+           */
+          const conformed = sizeForClass(Math.max(resolved.width, resolved.height), aspect);
           notes.push(
-            `That size is ${formatRatio(actual)}, not ${formatRatio(aspect.ratio)} — ` +
-            'the framing setting decides whether the difference is cropped or letterboxed.'
+            `${resolved.width} × ${resolved.height} is ${formatRatio(actual)}, not ` +
+            `${formatRatio(aspect.ratio)}. The aspect ratio wins: the output will be ` +
+            `${conformed.width} × ${conformed.height}. Set Aspect ratio to “Same as source” ` +
+            'to use those dimensions exactly.'
           );
         }
       }
@@ -3907,6 +3931,40 @@
       : 'Face and person detection is not installed, so tracking will use motion and detail saliency alone. Install it under Settings → Models.';
   }
 
+  /**
+   * A size class resolved against a ratio.
+   *
+   * `long` is the long edge; the ratio decides the other one. This is the
+   * semantic `suggestedResolution()` has always used (1920 for landscape,
+   * 1080 across for portrait), so classes and suggestions agree instead of
+   * describing two different geometries.
+   */
+  function sizeForClass(longEdge, aspect) {
+    const ratio = aspect ? aspect.ratio : sourceRatio();
+    if (!ratio) return null;
+    return ratio >= 1
+      ? { width: evenDim(longEdge), height: evenDim(longEdge / ratio) }
+      : { width: evenDim(longEdge * ratio), height: evenDim(longEdge) };
+  }
+
+  /** The class option that resolves to exactly these dimensions, if any. */
+  function matchingSizeClass(target) {
+    const aspect = currentAspect();
+    for (const option of el.createRes.options) {
+      if (!option.value.startsWith('long:')) continue;
+      const size = sizeForClass(Number(option.value.slice(5)), aspect);
+      if (size && size.width === target.width && size.height === target.height) return option.value;
+    }
+    return null;
+  }
+
+  /** The shape of the loaded source, for when no ratio has been chosen. */
+  function sourceRatio() {
+    const d = state.createAnalysis && state.createAnalysis.derived;
+    if (!d || !d.displayWidth || !d.displayHeight) return null;
+    return d.displayWidth / d.displayHeight;
+  }
+
   /** The concrete output size the panel currently describes, or null. */
   function resolveGeometryChoice(aspect, suggestion) {
     const value = el.createRes.value;
@@ -3916,9 +3974,15 @@
       if (!(w > 0) || !(h > 0)) return null;
       return { width: evenDim(w), height: evenDim(h) };
     }
+    if (value.startsWith('long:')) {
+      return sizeForClass(Number(value.slice(5)), aspect);
+    }
+    // A fixed pair from a saved recipe or an older setting. Kept working, and
+    // conformed to the ratio rather than allowed to override it.
     if (/^\d+x\d+$/.test(value)) {
       const [w, h] = value.split('x').map(Number);
-      return { width: w, height: h };
+      if (!aspect) return { width: w, height: h };
+      return sizeForClass(Math.max(w, h), aspect);
     }
     if (value === 'auto') return suggestion || null;
     return null;   // 'source'

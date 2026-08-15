@@ -640,7 +640,8 @@ async function resolveRemoteForJob(job) {
       headers: {
         video: s.resolved.video.headers,
         audio: s.resolved.audio ? s.resolved.audio.headers : null
-      }
+      },
+      declared: declaredFrom(s.resolved)
     };
   }
 
@@ -666,7 +667,34 @@ async function resolveRemoteForJob(job) {
     headers: {
       video: resolved.video.headers,
       audio: resolved.audio ? resolved.audio.headers : null
-    }
+    },
+    declared: declaredFrom(resolved)
+  };
+}
+
+/**
+ * What the site says about the rendition being rendered.
+ *
+ * Carried alongside the URLs so a refused ffprobe request does not end a
+ * render: these are the same measured facts the resolver already reported, and
+ * they are marked as declared rather than probed wherever they are used.
+ */
+function declaredFrom(resolved) {
+  const v = resolved && resolved.video;
+  if (!v || !v.width || !v.height) return null;
+  return {
+    width: v.width,
+    height: v.height,
+    fps: v.fps || null,
+    vcodec: v.vcodec || null,
+    acodec: resolved.audio ? resolved.audio.acodec : (v.acodec || null),
+    tbr: v.tbr || null,
+    duration: resolved.duration || null,
+    url: resolved.webpageUrl || null,
+    title: resolved.title || null,
+    // A split pair always has audio; a combined one has it when the format
+    // declares an audio codec.
+    hasAudio: !!resolved.audio || !!(v.acodec && v.acodec !== 'none')
   };
 }
 

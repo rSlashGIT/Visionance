@@ -515,7 +515,9 @@ async function run() {
     edited.aspect === '9:16' && edited.fps === '60', JSON.stringify(edited));
 
   // 6. changing a lock re-arms Auto rather than silently recomputing
-  await setControl('createRes', '1280x720');
+  // A size class, not a fixed pair: 'long:1280' under a 9:16 lock resolves
+  // to 720x1280, which is the whole point of the aspect-aware classes.
+  await setControl('createRes', 'long:1280');
   await sleep(350);
   const rearmed = await js(`(() => ({
     state: document.getElementById('autoState').textContent,
@@ -525,7 +527,7 @@ async function run() {
     result: document.getElementById('autoResult').textContent
   }))()`);
   check('changing a lock re-arms Auto Configure instead of recomputing behind the user',
-    /ready/i.test(rearmed.state) && rearmed.armed && rearmed.res === '1280x720',
+    /ready/i.test(rearmed.state) && rearmed.armed && rearmed.res === 'long:1280',
     JSON.stringify({ state: rearmed.state, armed: rearmed.armed }));
 
   await js(`document.getElementById('autoBuildBtn').click(); true`);
@@ -537,7 +539,7 @@ async function run() {
         framing: document.getElementById('createFraming').value
       } : null; })()`, 60000);
   check('re-running Auto decides again around the new requirement',
-    /1280×720/.test(reconfigured.text) && reconfigured.res === '1280x720',
+    /720×1280/.test(reconfigured.text) && reconfigured.res === 'long:1280',
     reconfigured.text.replace(/\s+/g, ' ').slice(0, 160));
 
   /* ---- a second, differently-shaped real source ---- */

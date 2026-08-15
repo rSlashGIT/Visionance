@@ -92,10 +92,47 @@ test('aspect: a custom ratio with nothing in it falls back rather than resolving
     broken.warnings.join(' | '));
 });
 
-test('aspect: explicit dimensions win over the ratio and are not stretched away', () => {
+/*
+ * This test used to assert the opposite, and that is why a real render came
+ * out 16:9 after the user selected 21:9.
+ *
+ * It gave a 16:9 canvas a 2560x1080 pair — a 21:9 shape — and asserted that
+ * the dimensions won. The product promise is the other way round: the ratio is
+ * a shape the user picked from a list of shapes, and a resolution cannot
+ * silently redefine it. The size is still honoured, on the long edge.
+ */
+test('aspect: the chosen ratio decides the shape, and the size is kept on the long edge', () => {
   const { geometry } = geometryFor({ canvas: '16:9', width: 2560, height: 1080, mode: 'fit' });
+  assert.ok(Math.abs(geometry.width / geometry.height - 16 / 9) < 0.02,
+    `${geometry.width}x${geometry.height} is not 16:9`);
+  assert.equal(geometry.width, 2560, 'the long edge the user asked for is kept');
+  assert.equal(geometry.height, 1440);
+});
+
+test('aspect: the exact failed render — 21:9 at a 2K class — resolves to 21:9', () => {
+  // 2560x1440 is a 16:9 pair. Written into a 21:9 framing block it used to be
+  // handed straight to the encoder, and the output really was 16:9.
+  const { geometry } = geometryFor({ canvas: '21:9', width: 2560, height: 1440, mode: 'fit' });
   assert.equal(geometry.width, 2560);
   assert.equal(geometry.height, 1080);
+  assert.ok(Math.abs(geometry.width / geometry.height - 64 / 27) < 0.02);
+});
+
+test('aspect: every ratio conforms, whatever pair it is handed', () => {
+  const cases = [
+    ['16:9', 1920, 1080], ['9:16', 1080, 1920], ['4:5', 2560, 1440],
+    ['1:1', 2560, 1440], ['21:9', 2560, 1440], ['2.39:1', 3840, 2160],
+    ['21:9', 1920, 1080], ['9:16', 3840, 2160]
+  ];
+  for (const [canvas, width, height] of cases) {
+    const { geometry } = geometryFor({ canvas, width, height, mode: 'fit' });
+    const wanted = recipes.aspectRatioOf(canvas);
+    const actual = geometry.width / geometry.height;
+    assert.ok(Math.abs(actual - wanted) < 0.02,
+      `${canvas} from ${width}x${height} -> ${geometry.width}x${geometry.height} (${actual.toFixed(3)})`);
+    assert.equal(geometry.width % 2, 0);
+    assert.equal(geometry.height % 2, 0);
+  }
 });
 
 test('aspect: odd dimensions are evened, and the user is told rather than surprised', () => {

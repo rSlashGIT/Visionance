@@ -529,6 +529,71 @@ function pickTags(tags) {
 }
 
 /**
+ * An analysis built from what a resolver *declared*, for when the probe cannot
+ * read the stream at all.
+ *
+ * ffprobe reads a site's direct CDN URL, and a site can simply refuse it —
+ * measured repeatedly against YouTube: the resolve succeeds, the probe comes
+ * back PROBE_FAILED in a few hundred milliseconds. Treating that as fatal
+ * fails a render whose every needed fact was already in the resolver's answer:
+ * the rendition states its width, height, frame rate, bitrate and codecs.
+ *
+ * These are declared rather than measured, and everything built from them says
+ * so through `fromRendition` and the warning. A field neither side reports
+ * stays null instead of becoming a plausible-looking invention.
+ *
+ * @param {object} meta {width, height, fps, vcodec, acodec, tbr, duration, hasAudio}
+ * @returns {object|null} an analysis, or null when even the size is unknown
+ */
+function analysisFromDeclared(meta) {
+  if (!meta || !meta.width || !meta.height) return null;
+  const w = Number(meta.width);
+  const h = Number(meta.height);
+  const bitrate = meta.tbr ? Math.round(Number(meta.tbr) * 1000) : null;
+  const duration = posNum(meta.duration);
+  const audio = meta.hasAudio
+    ? { codec: meta.acodec || null, channels: null, sampleRate: null, bitrate: null, isDefault: true }
+    : null;
+
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    analysedAt: Date.now(),
+    source: { type: 'remote', path: null, url: meta.url || null, name: meta.title || null },
+    container: { formatName: null, duration, size: null, bitrate, streamCount: audio ? 2 : 1, tags: {} },
+    video: {
+      width: w, height: h, nominalFps: posNum(meta.fps), codec: meta.vcodec || null,
+      bitrate, pixelFormat: null, duration, interlaced: null, rotationSwapsAxes: false
+    },
+    color: { isHDR: false, transfer: null },
+    audio,
+    audioStreams: audio ? [audio] : [],
+    subtitleStreams: [],
+    timing: null,
+    derived: {
+      displayWidth: w, displayHeight: h,
+      orientation: w > h ? 'landscape' : w < h ? 'portrait' : 'square',
+      aspectRatio: Math.round((w / h) * 10000) / 10000,
+      aspectRatioLabel: ratioString(w, h),
+      isVertical: h > w, isSquare: w === h, isHDR: false,
+      // Unknown, and left that way: `false` would be a claim.
+      isInterlaced: null,
+      nominalFps: posNum(meta.fps),
+      frameRateMode: 'unknown', frameRateModeConfidence: 'declared',
+      megapixels: Math.round((w * h) / 1e4) / 100,
+      resolutionClass: resolutionClass(w, h),
+      hasAudio: !!audio,
+      durationSeconds: duration,
+      estimatedFrames: duration && meta.fps ? Math.round(duration * Number(meta.fps)) : null
+    },
+    warnings: [
+      'This stream could not be probed directly, so these are the figures the site declares ' +
+      'for the rendition Visionance selected.'
+    ],
+    fromRendition: true
+  };
+}
+
+/**
  * Minimal shape used by the realtime player and older call sites. Kept as a
  * thin projection of the full analysis so there is only one probe path.
  */
@@ -552,6 +617,7 @@ function toLegacyInfo(analysis) {
 
 module.exports = {
   analyze,
+  analysisFromDeclared,
   toLegacyInfo,
   probeFrameTiming,
   parseRational,

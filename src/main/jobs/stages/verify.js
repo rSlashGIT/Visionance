@@ -15,6 +15,7 @@
 
 const fs = require('fs');
 const { analyze } = require('../../media-analyzer');
+const { aspectRatioOf } = require('../../recipe');
 const { VisionanceError, CODES } = require('../../errors');
 
 const MIN_BYTES = 4096;
@@ -22,6 +23,27 @@ const MIN_BYTES = 4096;
 const DURATION_TOLERANCE_RATIO = 0.05;
 const DURATION_TOLERANCE_SECONDS = 1.5;
 const FPS_TOLERANCE = 0.75;
+/**
+ * Even-pixel rounding moves a ratio slightly: 2560x1080 is 2.3704 against a
+ * nominal 2.3704, but 3840x1608 is 2.3881 against 2.39. A tolerance of 0.02
+ * accepts that and still rejects 16:9 (1.778) standing in for 21:9 (2.370).
+ */
+const ASPECT_TOLERANCE = 0.02;
+/** Audio that stops early is as broken as audio that never existed. */
+const AUDIO_DRIFT_SECONDS = 1.5;
+
+const KNOWN_RATIOS = [
+  [16 / 9, '16:9'], [9 / 16, '9:16'], [4 / 5, '4:5'], [1, '1:1'],
+  [64 / 27, '21:9'], [2.39, '2.39:1'], [4 / 3, '4:3'], [3 / 2, '3:2']
+];
+
+/** Name a ratio the way the user chose it, so a failure reads plainly. */
+function describeRatio(ratio) {
+  for (const [value, label] of KNOWN_RATIOS) {
+    if (Math.abs(ratio - value) < ASPECT_TOLERANCE) return label;
+  }
+  return `${ratio.toFixed(2)}:1`;
+}
 
 /**
  * @param {object} ctx
@@ -89,6 +111,29 @@ async function runVerify(ctx) {
       `${geometry.width}×${geometry.height}`,
       `${w}×${h}`
     );
+
+    /*
+     * The shape, checked separately from the size.
+     *
+     * A render that asked for 21:9 produced 2560x1440 — the right *size* class
+     * and the wrong shape — and passed verification, because the only geometry
+     * check compared the output against a resolved width and height that had
+     * already been corrupted by the same bug. Comparing the ratio against the
+     * *canvas the user chose* is an independent question, and it is the one
+     * that catches this.
+     */
+    const wanted = recipe.framing && recipe.framing.enabled
+      ? aspectRatioOf(recipe.framing.canvas, recipe.framing)
+      : null;
+    if (wanted && w && h) {
+      const actual = w / h;
+      add(
+        'aspect ratio matches the recipe',
+        Math.abs(actual - wanted) <= ASPECT_TOLERANCE,
+        `${describeRatio(wanted)} (${wanted.toFixed(3)})`,
+        `${describeRatio(actual)} (${actual.toFixed(3)})`
+      );
+    }
   }
 
   /* ---- frame rate ---- */
@@ -104,13 +149,51 @@ async function runVerify(ctx) {
     );
   }
 
-  /* ---- audio ---- */
-  const wantAudio = recipe.audio.enabled && recipe.audio.mode !== 'none' &&
-    (recipe.analysisRef ? recipe.analysisRef.hasAudio !== false : true);
-  if (wantAudio) {
-    add('audio track present', !!analysis.audio, 'one audio stream', analysis.audio ? analysis.audio.codec : 'none');
+  /* ---- audio ----
+   *
+   * The expectation comes from the job contract — what the render was set up
+   * to produce — not from a fact the source analysis happened to record.
+   *
+   * It used to be `recipe.audio.enabled && analysisRef.hasAudio !== false`.
+   * For a YouTube split source the analysis probes the video-only leg, so
+   * `hasAudio` is false, so the verifier *expected silence*, and a 610 MB
+   * music video with no sound was marked Completed. The verifier was asking
+   * the same broken oracle that had caused the failure.
+   *
+   * `ctx.expected.hasAudio` is set by the job manager from the recipe alone.
+   */
+  const contractWantsAudio = ctx.expected && typeof ctx.expected.hasAudio === 'boolean'
+    ? ctx.expected.hasAudio
+    : (recipe.audio.enabled && recipe.audio.mode !== 'none');
+  // A source with genuinely no audio cannot produce any, and saying "expected
+  // one audio stream" about a silent film would be its own kind of wrong.
+  const sourceHadAudio = ctx.sourceHasAudio !== false;
+
+  if (contractWantsAudio && sourceHadAudio) {
+    add('audio track present', !!analysis.audio, 'one audio stream',
+      analysis.audio ? analysis.audio.codec : 'none');
+    if (analysis.audio) {
+      // A stream that exists but carries nothing is the other way to ship
+      // silence, so its duration is checked against the picture's.
+      const audioDuration = analysis.audio.duration != null
+        ? analysis.audio.duration
+        : analysis.container.duration;
+      const videoDuration = analysis.container.duration;
+      if (audioDuration != null && videoDuration) {
+        const drift = Math.abs(audioDuration - videoDuration);
+        add(
+          'audio runs the length of the video',
+          audioDuration > 0 && drift <= Math.max(AUDIO_DRIFT_SECONDS, videoDuration * 0.02),
+          `≈ ${videoDuration.toFixed(2)}s`,
+          `${audioDuration.toFixed(2)}s`
+        );
+      }
+    }
+  } else if (contractWantsAudio && !sourceHadAudio) {
+    add('audio track present', true, 'none — the source has no audio', 'none', false);
   } else {
-    add('no audio track', !analysis.audio, 'no audio stream', analysis.audio ? analysis.audio.codec : 'none', false);
+    add('no audio track', !analysis.audio, 'no audio stream',
+      analysis.audio ? analysis.audio.codec : 'none', false);
   }
 
   report(1, 'Verified');

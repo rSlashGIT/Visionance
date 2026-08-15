@@ -44,6 +44,7 @@ const rife = require('../../ai/engines/rife');
 const { interpretResult, preferredGpu } = require('../../ai/process');
 const { buildPreNeuralFilters, buildPostNeuralFilters } = require('../../ffmpeg/filters');
 const { FfmpegRun, summariseFfmpegError } = require('../../ffmpeg/process');
+const { headerBlob } = require('../../media-analyzer');
 const chunking = require('../chunking');
 const { partPathFor } = require('./encode');
 const { VisionanceError, CODES } = require('../../errors');
@@ -445,8 +446,10 @@ async function processChunk({ ctx, chunk, aiPlan, dirs, report }) {
         for (let i = shot.startFrame; i <= shot.endFrame; i++) {
           fs.copyFileSync(frames.framePath(workingDir, i + 1), frames.framePath(shotIn, n++));
         }
-        // Trailing anchor: the real next frame when the shot continues past the
-        // chunk, otherwise a copy of its own last frame.
+        // Trailing anchor: the real next frame when the shot continues past
+        // the chunk, otherwise a copy of its own last frame. The duplicate is
+        // deliberate — see planInterpolation(), where removing it was measured
+        // to slow the motion inside every shot.
         const anchorSource = shot.anchor === 'next'
           ? frames.framePath(workingDir, shot.endFrame + 2)
           : frames.framePath(workingDir, shot.endFrame + 1);
@@ -540,6 +543,67 @@ async function processChunk({ ctx, chunk, aiPlan, dirs, report }) {
  *   addWarning  (message) => void
  * @returns {Promise<{outputPath:string|null, paused:boolean, metrics:object}>}
  */
+/**
+ * Bring a remote audio leg to local disk before the render starts.
+ *
+ * Two measured reasons, both from the same failed render.
+ *
+ * *Expiry*: the mux is the last thing that happens, and neural renders take
+ * hours. The URLs in that job carried `expire=` about three minutes before the
+ * job finished — the audio would have been unfetchable by the time it was
+ * wanted, however correct the rest of the code was.
+ *
+ * *Range requests*: measured against the same source, a plain sequential read
+ * of the audio leg succeeds, and the moment ffmpeg seeks or re-requests it the
+ * CDN answers 403. A trimmed render seeks by definition, so streaming the leg
+ * at mux time cannot be made reliable.
+ *
+ * An audio rendition is small — 3 MB for a three-minute track — so this costs
+ * a few seconds at the start and removes both failure modes. If it cannot be
+ * fetched the render continues and the *verifier* fails the job, because a
+ * silent file the user did not ask for must never be reported as success.
+ */
+async function fetchRemoteAudio(ctx) {
+  const { recipe, inputs, headers, bins, workspace, jobId, control, log } = ctx;
+  const wantsAudio = recipe.audio.enabled && recipe.audio.mode !== 'none';
+  if (!wantsAudio || !inputs.audio || !/^https?:/i.test(inputs.audio)) return;
+
+  // Deliberately beside the chunks rather than under `tmp/`: the per-chunk
+  // scratch is emptied between chunks, and the mux runs after the last one.
+  // Keeping it here also means a resumed job does not re-fetch it.
+  const target = workspace.resolve(jobId, 'source-audio.m4a');
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  if (fs.existsSync(target) && fs.statSync(target).size > 0) {
+    ctx.localAudio = target;
+    return;
+  }
+
+  const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y'];
+  const blob = headerBlob(headers.audio);
+  if (blob) args.push('-headers', blob);
+  // Deliberately no -ss and no -t: one sequential read of the whole leg is the
+  // request shape the CDN actually honours.
+  args.push('-i', inputs.audio, '-vn', '-c:a', 'copy', '-f', 'mp4', target);
+
+  const run = new FfmpegRun(bins.ffmpeg, args, { durationSeconds: 0 });
+  control.activeRun = run;
+  let result;
+  try {
+    result = await run.run();
+  } finally {
+    control.activeRun = null;
+  }
+
+  if (result.code === 0 && fs.existsSync(target) && fs.statSync(target).size > 0) {
+    ctx.localAudio = target;
+    log.info('audio leg fetched', { job: jobId, bytes: fs.statSync(target).size });
+    return;
+  }
+  log.warn('audio leg could not be fetched', {
+    job: jobId, code: result.code, detail: summariseFfmpegError(result.stderrTail, result.code)
+  });
+}
+
 async function runNeuralPipeline(ctx) {
   const { recipe, plan, control, workspace, jobId, log, aiPlan, reportStage } = ctx;
   let checkpoint = ctx.checkpoint;
@@ -552,6 +616,10 @@ async function runNeuralPipeline(ctx) {
   const totalChunks = plan.chunks.length;
   const metrics = { tileSize: null, sceneCuts: 0, framesProcessed: 0, chunksDone: checkpoint.completedChunks.length };
   const startedAt = Date.now();
+
+  // The sound is fetched now, while the URL is fresh and before hours of
+  // inference. See fetchRemoteAudio().
+  await fetchRemoteAudio(ctx);
 
   // How many frames the network will process over the whole job. The rate is
   // only useful against a total, and the total is knowable before we start.
@@ -683,7 +751,28 @@ async function finaliseNeural(ctx) {
   const listFile = workspace.concatListPath(jobId);
   fs.writeFileSync(listFile, lines.join('\n') + '\n', 'utf8');
 
-  const wantAudio = recipe.audio.enabled && recipe.audio.mode !== 'none' && !!(analysis && analysis.audio);
+  /*
+   * Where the sound actually is.
+   *
+   * This mux used to look for audio inside `ctx.inputs.video` and nowhere
+   * else. For a YouTube split source that input is the *video-only* rendition
+   * (itag 137 in the render that exposed this), so `analysis.audio` was null,
+   * `wantAudio` was false, `-an` was emitted, and a two-hour render finished
+   * with no sound at all. The audio leg was resolved, carried all the way here
+   * in `ctx.inputs.audio`, and simply never opened.
+   *
+   * `command.js` had always handled the split case for non-neural renders.
+   * This path is the neural pipeline's own mux and had never learned it.
+   */
+  // The local copy fetched at the start of the run when there is one: it is
+  // the same audio, and it is still there hours later.
+  const separateAudio = ctx.localAudio || ctx.inputs.audio || null;
+  const audioSource = separateAudio || ctx.inputs.video;
+  const audioHeaders = ctx.localAudio ? null
+    : (separateAudio ? ctx.headers.audio : ctx.headers.video);
+  const sourceHasAudio = !!separateAudio || !!(analysis && analysis.audio);
+  const wantAudio = recipe.audio.enabled && recipe.audio.mode !== 'none' && sourceHasAudio;
+
   const args = [
     '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
     '-f', 'concat', '-safe', '0', '-i', listFile
@@ -692,8 +781,15 @@ async function finaliseNeural(ctx) {
   if (wantAudio) {
     // Audio comes from the untouched source, trimmed to the same span as the
     // render, and is encoded once here rather than per chunk.
+    // A remote leg needs its headers and the same reconnect policy the encode
+    // path uses; a two-hour render outlives more than one CDN connection.
+    if (/^https?:/i.test(audioSource)) {
+      args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5');
+    }
+    const blob = headerBlob(audioHeaders);
+    if (blob) args.push('-headers', blob);
     if (recipe.trim.startSeconds) args.push('-ss', String(recipe.trim.startSeconds));
-    args.push('-i', ctx.inputs.video);
+    args.push('-i', audioSource);
     if (plan.totalDuration) args.push('-t', String(plan.totalDuration));
   }
 

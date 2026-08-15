@@ -133,8 +133,32 @@ function planInterpolation({
     const count = Math.max(0, jEnd - jStart);
 
     const inputFrames = shot.endFrame - shot.startFrame + 1;
-    // Only the final shot of a chunk can borrow a real frame from the next
-    // chunk; every other shot ends at a cut and must not look past it.
+    /*
+     * Only the final shot of a chunk can borrow a real frame from the next
+     * chunk; every other shot ends at a cut and must not look past it, so its
+     * trailing anchor is a copy of its own last frame.
+     *
+     * That duplicate looks like a bug and is not, which is worth writing down
+     * because it was "fixed" once and had to be put back.
+     *
+     * RIFE spreads N samples evenly across the images it is given, endpoints
+     * inclusive. With the duplicate, a shot's samples span source positions
+     * a … b+1, so the samples landing in [b, b+1) show frame b — which is
+     * exactly how long frame b is displayed in the source itself (1/23.976 =
+     * 41.7 ms, about 2.5 samples at 60 fps). Measured over the mapping:
+     *
+     *   with the duplicate anchor   motion runs at 1.0010x   (correct)
+     *   without it                  motion runs at 0.949x-0.988x, and the
+     *                               error grows as shots get shorter
+     *
+     * Removing the anchor removes the hold by *stretching the motion*, which
+     * is a worse defect than the thing it was removing: the hold is not an
+     * invention, it is the last source frame's own display interval.
+     *
+     * A hold that genuinely should not be there comes from a *false* cut
+     * detected inside continuous motion, and the fix for that is detection,
+     * not this.
+     */
     const anchor = count === 0 ? 'none'
       : (isLastShot && hasNextFrame) ? 'next'
         : 'duplicate';
@@ -145,16 +169,38 @@ function planInterpolation({
     else if (count === inputFrames && Math.abs(dst - src) < 0.001) mode = 'copy';
     else mode = 'rife';
 
+    /*
+     * How many samples to ask RIFE for, and why it is not `count + 1`.
+     *
+     * RIFE spreads N samples evenly across the images it is given, so the
+     * spacing it uses is (images - 1) / (N - 1) source frames per sample. For
+     * playback to run at 1x that spacing must be exactly fpsSrc / fpsDst.
+     *
+     * Asking for `count + 1` made the spacing depend on `count`, which is the
+     * *rounded* number of output frames this shot happens to occupy. A shot
+     * whose count rounded up came out slow; one that rounded down came out
+     * fast. Measured on 23.976 -> 60: a 12-frame shot ran at 0.969x, a
+     * 24-frame shot at 0.984x, and the error grows as shots get shorter — so
+     * on a fast-cut music video the speed changes every second or so. That is
+     * the "fast-forwarded in places" report, and it survives every check that
+     * looks at frame counts, frame rate or total duration, because all three
+     * are correct.
+     *
+     * Deriving N from the rate ratio instead pins the spacing to fpsSrc/fpsDst
+     * for every shot, whatever its length.
+     */
+    const spacingSamples = 1 + Math.round((inputFrames * dst) / src);
+    const requestFrames = mode === 'rife' ? Math.max(count, spacingSamples) : count;
+
     planned.push({
       index: planned.length,
       startFrame: shot.startFrame,
       endFrame: shot.endFrame,
       inputFrames,
       anchor,
-      // RIFE is asked for one extra frame; the last lands on the anchor and is
-      // thrown away, leaving samples spread across the true display interval.
-      requestFrames: mode === 'rife' ? count + 1 : count,
-      dropTrailing: mode === 'rife' ? 1 : 0,
+      requestFrames,
+      // Keep the first `count`; anything past them belongs to the next shot.
+      dropTrailing: mode === 'rife' ? Math.max(0, requestFrames - count) : 0,
       outputStart: jStart,
       outputCount: count,
       mode,

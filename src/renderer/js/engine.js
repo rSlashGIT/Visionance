@@ -179,9 +179,23 @@
        */
       this.policy = 'auto';
 
+      /*
+       * Three clocks, never conflated.
+       *
+       *   media        what the decoder produced        (sourceFps, mediaVsWall)
+       *   enhancement  what we drew and what it cost    (enhancedFps, gpuMs, misses)
+       *   display      what the compositor refreshes at (presentedFps upstream)
+       *
+       * The old stats block mixed the first two and read the third from a
+       * counter that does not describe it - see `_sampleDropRate()`.
+       */
       this.stats = {
         fps: 0,
+        /** CPU time spent *submitting* the frame. Not the cost of drawing it. */
         cpuMs: 0,
+        /** Real GPU time per frame, where the driver exposes timer queries. */
+        gpuMs: 0,
+        gpuTimingAvailable: false,
         outputW: 0,
         outputH: 0,
         sourceW: 0,
@@ -190,20 +204,44 @@
         gpu: 'unknown',
         /** Measured presentation cadence of the *media*, not of our renders. */
         sourceFps: 0,
+        /** Enhanced frames we actually put on the canvas, per second. */
+        enhancedFps: 0,
         frameBudgetMs: 0,
         /** Frames we chose not to enhance because they were already stale. */
         skipped: 0,
+        /** Share of source frames that never became an enhanced frame. */
+        missRate: 0,
+        /**
+         * Media time advanced per second of wall clock. 1.0 means playback is
+         * keeping real time, which is the contract. Immune to how the media
+         * element is composited, unlike the decoder's dropped-frame counter.
+         */
+        mediaVsWall: 1,
+        /** Decoder drops. Only meaningful while the element is on screen. */
+        decoderDropRate: 0,
+        decoderDropTrusted: false,
+        scheduler: 'frame-gated',
         limited: false,
         policy: 'auto'
       };
 
       this._frameTimes = [];
+      this._gpuTimes = [];
       this._lastStatsAt = performance.now();
       this._framesSinceStats = 0;
       this._qualityScale = 1;
       this._rvfcHandle = null;
       this._rafHandle = null;
+      this._idleHandle = null;
+      this._presentLoop = null;
+      this._videoListeners = [];
       this._needsDraw = true;
+      /** A new source frame is waiting to be drawn on the next refresh. */
+      this._pendingFrame = false;
+      /** Source frames signalled since the last stats tick. */
+      this._sourceFrames = 0;
+      /** Media/wall-clock tracking, the cadence contract's own measurement. */
+      this._clockMark = null;
 
       // Frame pacing state.
       this._lastFrameAt = 0;
@@ -252,6 +290,24 @@
       this.precision = hasHalfFloat ? '16-bit float' : '8-bit';
 
       this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+
+      /*
+       * Real GPU time per frame.
+       *
+       * A `performance.now()` bracket around the draw calls measures how long
+       * it took to *queue* them, not how long the GPU spent. Measured on the
+       * reference laptop the two differ by more than twenty times: the bracket
+       * reads 0.9 ms while the chain actually costs 20.2 ms of a 41.7 ms
+       * budget. A governor fed the first number believes it has forty times
+       * the headroom it has, which is precisely what it did.
+       *
+       * Queries are read back a frame later so nothing ever blocks on the GPU;
+       * where the extension is missing the governor falls back to the cadence
+       * signals, which need no driver support.
+       */
+      this._timerExt = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+      this._pendingQueries = [];
+      this.stats.gpuTimingAvailable = !!this._timerExt;
 
       this.vao = gl.createVertexArray();
       gl.bindVertexArray(this.vao);
@@ -303,15 +359,52 @@
     }
 
     setVideo(videoEl) {
+      this._unbindVideo();
       this.video = videoEl;
       this._videoTextureSize = null;
       this._needsDraw = true;
+      this._bindVideo();
       this._restartFrameSource();
+    }
+
+    _bindVideo() {
+      const v = this.video;
+      if (!v || !v.addEventListener) return;
+      const wake = () => this._wakePresentation();
+      // A paused engine draws on demand; these are the moments the picture
+      // starts moving again and the presentation clock has to come back.
+      const once = () => { this._needsDraw = true; this._scheduleIdleDraw(); };
+      for (const [event, fn] of [
+        ['play', wake], ['playing', wake], ['seeking', once], ['seeked', once],
+        ['loadeddata', once], ['ratechange', wake]
+      ]) {
+        v.addEventListener(event, fn);
+        this._videoListeners.push([event, fn]);
+      }
+    }
+
+    _unbindVideo() {
+      const v = this.video;
+      if (v && v.removeEventListener) {
+        for (const [event, fn] of this._videoListeners) v.removeEventListener(event, fn);
+      }
+      this._videoListeners = [];
+    }
+
+    /**
+     * Mark the canvas stale and make sure something will redraw it.
+     *
+     * While playing, the presentation loop handles it on the next refresh.
+     * While paused there is no loop - by design - so one callback is scheduled.
+     */
+    _invalidate() {
+      this._needsDraw = true;
+      this._scheduleIdleDraw();
     }
 
     setParams(patch) {
       Object.assign(this.params, patch || {});
-      this._needsDraw = true;
+      this._invalidate();
     }
 
     getParams() {
@@ -321,7 +414,7 @@
     setCompare(mode, splitX) {
       this.compareMode = mode | 0;
       if (typeof splitX === 'number') this.splitX = Math.min(1, Math.max(0, splitX));
-      this._needsDraw = true;
+      this._invalidate();
     }
 
     setRenderScaleCap(cap) {
@@ -331,7 +424,7 @@
       // look like it did nothing.
       this._qualityScale = 1;
       this.stats.limited = false;
-      this._needsDraw = true;
+      this._invalidate();
     }
 
     setAdaptive(enabled) {
@@ -340,7 +433,7 @@
         this._qualityScale = 1;
         this.stats.limited = false;
       }
-      this._needsDraw = true;
+      this._invalidate();
     }
 
     start() {
@@ -351,6 +444,100 @@
 
     stop() {
       this.running = false;
+      this._cancelFrameSource();
+      if (this._idleHandle) cancelAnimationFrame(this._idleHandle);
+      this._idleHandle = null;
+      this._presentLoop = null;
+      this._pendingFrame = false;
+    }
+
+    /**
+     * Two clocks, each doing the job it is good at.
+     *
+     * `requestVideoFrameCallback` answers *what* to draw: it fires once per
+     * decoded frame, so a 24 fps film costs 24 draws per second and never 60.
+     * It does no work itself - it raises a flag.
+     *
+     * `requestAnimationFrame` answers *when* to draw. The media's cadence has
+     * no relationship to the display's refresh, so committing the canvas from
+     * inside the video callback lands the new pixels at an arbitrary phase in
+     * the refresh interval; the compositor then shows some frames for two
+     * refreshes and some for four, irregularly. Measured on the reference
+     * laptop with a 23.976 fps source on a 60 Hz panel, drawing inside rvfc put
+     * 18.6% of frames outside the legal {2,3} refresh pattern against 12.4%
+     * when the same draws were committed on a refresh boundary. Same draw
+     * count, same source cadence, less judder.
+     *
+     * The expensive work is still gated on a genuinely new source frame, so
+     * this is not an ambient 60 fps render loop: with no new frame the callback
+     * returns immediately having touched nothing.
+     *
+     * Without rvfc there is no way to know when a frame is new, so the fallback
+     * draws every refresh and says so in the stats.
+     */
+    _restartFrameSource() {
+      if (!this.running) return;
+      this._cancelFrameSource();
+
+      const useRvfc = this.video && typeof this.video.requestVideoFrameCallback === 'function';
+      this.stats.scheduler = useRvfc ? 'frame-gated' : 'refresh';
+
+      if (!useRvfc) {
+        const loop = () => {
+          if (!this.running) return;
+          this._rafHandle = requestAnimationFrame(loop);
+          this._sourceFrames++;
+          this._drawSafe();
+        };
+        this._rafHandle = requestAnimationFrame(loop);
+        return;
+      }
+
+      const mark = (now, meta) => {
+        if (!this.running) return;
+        // Re-arm first: if the draw overruns, the callback for the frame we
+        // missed is already registered and we resume on the newest frame
+        // rather than working through a backlog.
+        this._rvfcHandle = this.video.requestVideoFrameCallback(mark);
+        this._notePresentation(now, meta);
+        this._sourceFrames++;
+        this._pendingFrame = true;
+      };
+      this._rvfcHandle = this.video.requestVideoFrameCallback(mark);
+
+      /*
+       * The presentation loop exists only while the picture is moving.
+       *
+       * Leaving it armed over a paused video would be a 60 Hz callback for a
+       * source that is not producing frames - the ambient render loop this
+       * project does not allow. It stops itself when playback stops and the
+       * media's own `play` event brings it back; a paused redraw goes through
+       * `_scheduleIdleDraw()` instead, which fires once.
+       */
+      const present = () => {
+        if (!this.running) return;
+        if (this.video && this.video.paused) {
+          this._rafHandle = null;
+          if (this._needsDraw) this._drawSafe();
+          return;
+        }
+        this._rafHandle = requestAnimationFrame(present);
+        if (!this._pendingFrame && !this._needsDraw) return;
+        this._pendingFrame = false;
+        this._drawSafe();
+      };
+      this._presentLoop = present;
+      if (!this.video.paused) this._rafHandle = requestAnimationFrame(present);
+    }
+
+    /** Restart the presentation loop when the media starts moving again. */
+    _wakePresentation() {
+      if (!this.running || this._rafHandle || !this._presentLoop) return;
+      if (this.video && this.video.paused) return;
+      this._rafHandle = requestAnimationFrame(this._presentLoop);
+    }
+
+    _cancelFrameSource() {
       if (this._rafHandle) cancelAnimationFrame(this._rafHandle);
       this._rafHandle = null;
       if (this._rvfcHandle && this.video && this.video.cancelVideoFrameCallback) {
@@ -360,41 +547,22 @@
     }
 
     /**
-     * Prefer requestVideoFrameCallback: it fires once per decoded frame, so a
-     * 24 fps film costs 24 renders per second instead of 60.
+     * Redraw once, outside playback.
+     *
+     * A parameter change while paused, a seek, a resize. The engine used to
+     * keep a permanent 60 Hz rAF alive for this and check a flag inside it,
+     * which is a render loop running for a source that is not moving. One
+     * scheduled callback does the same job and then stops.
      */
-    _restartFrameSource() {
-      if (!this.running) return;
-      if (this._rafHandle) cancelAnimationFrame(this._rafHandle);
-      this._rafHandle = null;
-
-      const useRvfc = this.video && typeof this.video.requestVideoFrameCallback === 'function';
-      if (useRvfc) {
-        const step = (now, meta) => {
-          if (!this.running) return;
-          this._notePresentation(now, meta);
-          // Ask for the next frame *before* drawing. If this draw overruns, the
-          // callback for the frame we missed has already been registered, so we
-          // resume on the newest frame rather than working through a backlog.
-          this._rvfcHandle = this.video.requestVideoFrameCallback(step);
-          this._drawSafe();
-        };
-        this._rvfcHandle = this.video.requestVideoFrameCallback(step);
-        // A low-rate rAF keeps the canvas correct while paused or seeking.
-        const idle = () => {
-          if (!this.running) return;
-          if (this._needsDraw || (this.video && this.video.paused)) this._drawSafe();
-          this._rafHandle = requestAnimationFrame(idle);
-        };
-        this._rafHandle = requestAnimationFrame(idle);
-      } else {
-        const loop = () => {
-          if (!this.running) return;
-          this._drawSafe();
-          this._rafHandle = requestAnimationFrame(loop);
-        };
-        this._rafHandle = requestAnimationFrame(loop);
-      }
+    _scheduleIdleDraw() {
+      if (!this.running || this._idleHandle) return;
+      this._idleHandle = requestAnimationFrame(() => {
+        this._idleHandle = null;
+        if (!this.running) return;
+        // While playing, the presentation loop already owns the canvas.
+        if (this.video && !this.video.paused && this.stats.scheduler === 'frame-gated') return;
+        if (this._needsDraw) this._drawSafe();
+      });
     }
 
     /**
@@ -475,41 +643,59 @@
       const displayW = Math.max(320, Math.round(rect.width * dpr));
       const displayH = Math.max(180, Math.round(rect.height * dpr));
 
-      let factor;
+      // The factor at which one rendered pixel is one pixel on the panel.
+      // Below this the viewer genuinely loses detail; above it we are rendering
+      // for a display that cannot show the difference.
+      const fitFactor = Math.max(displayW / srcW, displayH / srcH);
+
+      let target;
       if (this.renderScaleCap === 'auto') {
-        // Render just enough pixels to saturate the *viewport*, capped so a
-        // 360p clip on a 4K panel does not try to hallucinate 12x detail.
-        // Enhancing pixels the user cannot see is pure cost: a 1440p source in
-        // a 1000px-wide window only needs ~1000px of enhancement.
-        const fitW = displayW / srcW;
-        const fitH = displayH / srcH;
-        factor = Math.min(Math.max(fitW, fitH), this._maxScaleForPolicy());
+        // Enough pixels to saturate the *viewport*, capped so a 360p clip on a
+        // 4K panel does not try to hallucinate 12x detail.
+        target = Math.min(Math.max(1, fitFactor), this._maxScaleForPolicy());
       } else {
-        factor = Number(this.renderScaleCap) || 1;
+        target = Number(this.renderScaleCap) || 1;
       }
 
-      // Adaptive quality may pull the scale back down, but never below native:
-      // rendering under the source resolution destroys real detail, which is
-      // strictly worse than doing nothing.
-      factor = Math.max(1, Math.max(1, factor) * this._qualityScale);
-
-      let outW = Math.round(srcW * factor);
-      let outH = Math.round(srcH * factor);
-
+      /*
+       * Both ceilings are applied to the *target* before the quality scale
+       * interpolates, not to the result afterwards.
+       *
+       * Clamping afterwards is what made the lever look connected and behave
+       * as though it were not: the ceiling swallowed most of the travel, so
+       * moving the scale from 1.0 to 0.5 changed the render by 2%.
+       */
       const maxDim = Math.min(this.maxTextureSize, 7680);
-      if (outW > maxDim || outH > maxDim) {
-        const s = Math.min(maxDim / outW, maxDim / outH);
-        outW = Math.round(outW * s);
-        outH = Math.round(outH * s);
-      }
-      // No point rendering far above what the panel can show.
-      const ceilW = Math.round(displayW * 1.35);
-      const ceilH = Math.round(displayH * 1.35);
-      if (outW > ceilW || outH > ceilH) {
-        const s = Math.min(ceilW / outW, ceilH / outH);
-        outW = Math.max(srcW, Math.round(outW * s));
-        outH = Math.max(srcH, Math.round(outH * s));
-      }
+      target = Math.min(
+        target,
+        // No point rendering far above what the panel can show. The 1.35 is the
+        // supersampling allowance, and it is the first thing given up.
+        Math.min((displayW * 1.35) / srcW, (displayH * 1.35) / srcH),
+        Math.min(maxDim / srcW, maxDim / srcH)
+      );
+
+      /*
+       * A quality scale that can actually change the cost.
+       *
+       * This used to read `Math.max(1, factor * qualityScale)`, with the
+       * ceiling clamp below ending in `Math.max(srcW, ...)`. Between them the
+       * output could never fall below the source, so on the reference laptop -
+       * a 2560x1350 source in a ~1400px stage - render scales of 1, 1.5 and 2
+       * all measured the same 2560x1350 and the same 20 ms. The governor spent
+       * the session reporting "45%" while changing nothing at all.
+       *
+       * So the scale now interpolates between the full-quality target and the
+       * size the panel actually shows, and the floor is that display-matched
+       * size rather than the source. Rendering above the display is
+       * supersampling - real, but the first thing to give up under pressure.
+       * Rendering below it is the point where the viewer starts to lose
+       * something, and the scale never goes there on its own.
+       */
+      const displayMatched = Math.min(target, fitFactor);
+      const factor = displayMatched + (target - displayMatched) * this._qualityScale;
+
+      const outW = Math.max(16, Math.round(srcW * factor));
+      const outH = Math.max(16, Math.round(srcH * factor));
       return { outW, outH };
     }
 
@@ -560,11 +746,66 @@
       void pass;
     }
 
+    /** Begin a GPU timer for this frame, if the driver offers one. */
+    _beginGpuTimer() {
+      const ext = this._timerExt;
+      if (!ext || this._pendingQueries.length > 3) return null;
+      const gl = this.gl;
+      const query = gl.createQuery();
+      try {
+        gl.beginQuery(ext.TIME_ELAPSED_EXT, query);
+      } catch {
+        gl.deleteQuery(query);
+        return null;
+      }
+      return query;
+    }
+
+    _endGpuTimer(query) {
+      if (!query) return;
+      const gl = this.gl;
+      try {
+        gl.endQuery(this._timerExt.TIME_ELAPSED_EXT);
+        this._pendingQueries.push(query);
+      } catch {
+        gl.deleteQuery(query);
+      }
+    }
+
+    /** Collect finished timers. Never blocks: unfinished queries simply wait. */
+    _collectGpuTimers() {
+      const ext = this._timerExt;
+      if (!ext || !this._pendingQueries.length) return;
+      const gl = this.gl;
+      const disjoint = gl.getParameter(ext.GPU_DISJOINT_EXT);
+      const keep = [];
+      for (const query of this._pendingQueries) {
+        let ready = false;
+        try {
+          ready = gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE);
+        } catch { ready = true; }
+        if (!ready) { keep.push(query); continue; }
+        if (!disjoint) {
+          try {
+            const ns = gl.getQueryParameter(query, gl.QUERY_RESULT);
+            if (Number.isFinite(ns) && ns > 0) {
+              this._gpuTimes.push(ns / 1e6);
+              if (this._gpuTimes.length > 60) this._gpuTimes.shift();
+            }
+          } catch { /* driver withdrew the result */ }
+        }
+        gl.deleteQuery(query);
+      }
+      this._pendingQueries = keep;
+    }
+
     draw() {
       const gl = this.gl;
       const v = this.video;
       if (!v || v.readyState < 2) return;
 
+      this._collectGpuTimers();
+      const timer = this._beginGpuTimer();
       const t0 = performance.now();
       const srcW = v.videoWidth;
       const srcH = v.videoHeight;
@@ -662,6 +903,7 @@
       }
 
       gl.bindVertexArray(null);
+      this._endGpuTimer(timer);
       this._needsDraw = false;
 
       this._updateStats(t0, srcW, srcH, outW, outH);
@@ -677,8 +919,45 @@
       const elapsed = now - this._lastStatsAt;
       if (elapsed >= 500) {
         const avg = this._frameTimes.reduce((a, b) => a + b, 0) / this._frameTimes.length;
-        this.stats.fps = Math.round((this._framesSinceStats * 1000) / elapsed);
+        const gpuMs = this._medianGpuMs();
+
+        /*
+         * Did the media keep real time?
+         *
+         * This is the cadence contract stated as a number, and it is the one
+         * measurement in here that cannot be confused by how the media element
+         * is composited: with the element parked off-screen the decoder reports
+         * up to 98% "dropped" frames while media time still advances at exactly
+         * 1.0x. What the user is promised is that the clock keeps running, and
+         * this is that promise, measured.
+         */
+        const v = this.video;
+        let mediaVsWall = 1;
+        if (v && !v.paused && Number.isFinite(v.currentTime)) {
+          const mark = this._clockMark;
+          if (mark && now > mark.at) {
+            const wallSec = (now - mark.at) / 1000;
+            const mediaSec = (v.currentTime - mark.mediaTime) * (v.playbackRate || 1);
+            if (wallSec > 0.25 && mediaSec >= 0) {
+              mediaVsWall = Math.max(0, Math.min(2, mediaSec / wallSec / (v.playbackRate || 1)));
+            }
+          }
+          this._clockMark = { at: now, mediaTime: v.currentTime };
+        } else {
+          this._clockMark = null;
+        }
+
+        // Source frames that never became an enhanced frame. Measured from our
+        // own counters, so it describes the enhanced picture rather than the
+        // hidden element the decoder is accounting for.
+        const seen = this._sourceFrames;
+        const drawn = this._framesSinceStats;
+        const missRate = seen > 0 ? Math.max(0, Math.min(1, (seen - drawn) / seen)) : 0;
+
+        this.stats.fps = Math.round((drawn * 1000) / elapsed);
+        this.stats.enhancedFps = Math.round((drawn * 1000) / elapsed * 10) / 10;
         this.stats.cpuMs = Math.round(avg * 100) / 100;
+        this.stats.gpuMs = Math.round(gpuMs * 100) / 100;
         this.stats.sourceW = srcW;
         this.stats.sourceH = srcH;
         this.stats.outputW = outW;
@@ -689,12 +968,49 @@
           : 0;
         this.stats.frameBudgetMs = Math.round(this.frameBudgetMs() * 10) / 10;
         this.stats.skipped = this._skippedSinceStats;
+        this.stats.missRate = Math.round(missRate * 1000) / 10;
+        this.stats.mediaVsWall = Math.round(mediaVsWall * 1000) / 1000;
         this.stats.policy = this.policy;
+
+        // Reported for the diagnostics panel, never fed to the governor while
+        // the element is parked. See `_sampleDropRate()`.
+        const decoderDrop = this._sampleDropRate();
+        this.stats.decoderDropRate = Math.round(decoderDrop * 1000) / 10;
+        this.stats.decoderDropTrusted = this._decoderDropsTrustworthy();
+
         this._skippedSinceStats = 0;
         this._framesSinceStats = 0;
+        this._sourceFrames = 0;
         this._lastStatsAt = now;
 
-        if (this.adaptive) this._adapt(avg);
+        if (this.adaptive) this._adapt({ gpuMs, cpuMs: avg, missRate, mediaVsWall });
+      }
+    }
+
+    _medianGpuMs() {
+      if (!this._gpuTimes.length) return 0;
+      const sorted = [...this._gpuTimes].sort((a, b) => a - b);
+      return sorted[Math.floor(sorted.length / 2)];
+    }
+
+    /**
+     * Is `droppedVideoFrames` describing what the user sees?
+     *
+     * Only when the media element is the picture. Watch parks it at 1x1,
+     * opacity 0, off-screen whenever the canvas is the picture, and a measured
+     * A/B on the reference laptop put the counter at 0% visible against 97.9%
+     * parked over the same clip, with media time advancing at 1.0x throughout.
+     * The frames were decoded and handed to us; they were simply never painted
+     * by an element nobody can see.
+     */
+    _decoderDropsTrustworthy() {
+      const v = this.video;
+      if (!v || typeof v.getBoundingClientRect !== 'function') return false;
+      try {
+        const r = v.getBoundingClientRect();
+        return r.width > 2 && r.height > 2;
+      } catch {
+        return false;
       }
     }
 
@@ -715,26 +1031,37 @@
      *   over the budget            -> lower
      *   far over the budget        -> lower quickly
      */
-    _adapt(avgMs) {
+    _adapt({ gpuMs, cpuMs, missRate, mediaVsWall }) {
       const budget = this.frameBudgetMs();
-      const ratio = avgMs / budget;
       const floor = this._qualityFloor();
 
-      // Our own draw time is not the whole story. Uploading a 1080p frame and
-      // presenting a canvas costs GPU bandwidth that never appears in this
-      // timer, so a pass can measure 0.8 ms of a 16.7 ms budget while the
-      // compositor quietly drops a quarter of the frames. The decoder's own
-      // dropped-frame count is the outcome that actually matters, so it drives
-      // the governor directly.
-      const dropRate = this._sampleDropRate();
+      /*
+       * What the governor is allowed to believe.
+       *
+       * It used to run on two numbers that both described something else. The
+       * CPU bracket around the draw calls measures submission, not rendering -
+       * measured at 0.9 ms against a real 20.2 ms - so it permanently voted to
+       * raise quality. And `droppedVideoFrames` on the parked element measured
+       * the invisible element rather than the canvas - measured at 97.9% while
+       * media time held 1.0x - so it permanently voted to lower it. The
+       * quality scale ended up near its floor with the picture unchanged,
+       * because the scale could not reduce anything either.
+       *
+       * These three can all be checked against the contract:
+       *   cost      real GPU time where the driver exposes it
+       *   misses    source frames we were handed and did not draw
+       *   slip      media time falling behind the wall clock
+       */
+      const cost = gpuMs > 0 ? gpuMs : cpuMs;
+      const ratio = cost / budget;
+      const slipping = mediaVsWall < 0.97;
 
-      if (dropRate > 0.12) this._pressure += 3;
-      else if (dropRate > 0.04) this._pressure += 2;
-      else if (ratio > 1.15) this._pressure += 2;
-      else if (ratio > 0.85) this._pressure += 1;
-      else if (dropRate < 0.01 && ratio < 0.5) this._pressure -= 1;
+      if (missRate > 0.15 || slipping) this._pressure += 3;
+      else if (missRate > 0.05) this._pressure += 2;
+      else if (ratio > 0.9) this._pressure += 2;
+      else if (ratio > 0.7) this._pressure += 1;
+      else if (missRate < 0.02 && ratio < 0.45) this._pressure -= 1;
       else this._pressure = Math.sign(this._pressure) * Math.max(0, Math.abs(this._pressure) - 0.5);
-      this.stats.dropRate = Math.round(dropRate * 1000) / 10;
       this._pressure = Math.max(-4, Math.min(6, this._pressure));
 
       if (this._pressure >= 4) {
@@ -747,6 +1074,8 @@
         this._pressure = 0;
       } else if (this._pressure <= -3 && this._qualityScale < 1) {
         // Recover gently, so regaining headroom does not immediately cost it.
+        // Deliberately a fifth of the emergency step: backing off must always
+        // be faster than climbing back.
         this._qualityScale = Math.min(1, this._qualityScale + 0.05);
         this._pressure = 0;
       }
@@ -754,7 +1083,7 @@
       // At the floor and still losing frames means the GPU cannot sustain this
       // look; the UI can tell the user rather than just stuttering silently.
       const atFloor = this._qualityScale <= floor + 0.001;
-      this.stats.limited = (ratio > 1.05 || dropRate > 0.04) && atFloor;
+      this.stats.limited = (ratio > 1.05 || missRate > 0.05 || slipping) && atFloor;
 
       /*
        * Last resort: give up on enhancement rather than on the motion.
@@ -769,17 +1098,18 @@
        * Smooth motion is the product promise; a sharper but stuttering picture
        * is not a trade we make silently.
        */
-      if (atFloor && dropRate > 0.15) {
+      if (atFloor && (missRate > 0.15 || slipping)) {
         this._overloadStreak++;
         if (this._overloadStreak >= 4 && this.onOverload) {
           this._overloadStreak = 0;
           this.onOverload({
-            dropRate: Math.round(dropRate * 100),
+            missRate: Math.round(missRate * 100),
+            mediaVsWall,
             sourceFps: this.stats.sourceFps,
             policy: this.policy
           });
         }
-      } else if (dropRate < 0.05) {
+      } else if (missRate < 0.05 && !slipping) {
         this._overloadStreak = 0;
       }
     }
@@ -832,7 +1162,7 @@
       this.adaptive = this.policy !== 'maximum';
       if (this.policy === 'maximum') this._qualityScale = 1;
       this._pressure = 0;
-      this._needsDraw = true;
+      this._invalidate();
       return this.policy;
     }
 
@@ -846,8 +1176,13 @@
 
     dispose() {
       this.stop();
+      this._unbindVideo();
       const gl = this.gl;
       if (!gl) return;
+      for (const q of this._pendingQueries || []) {
+        try { gl.deleteQuery(q); } catch { /* already gone */ }
+      }
+      this._pendingQueries = [];
       this.rtA.dispose();
       this.rtB.dispose();
       this.rtC.dispose();

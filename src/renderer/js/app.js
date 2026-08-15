@@ -1012,9 +1012,17 @@
       if (!state.params.enabled) return;
       // An explicit Quality/Maximum choice is the user's call to make; warn but
       // do not override it. Auto and Performance exist to be decided for you.
+      // `missRate` is source frames we were handed and did not draw, and
+      // `mediaVsWall` is the playback clock itself. Both describe the enhanced
+      // picture. The decoder's dropped-frame counter, which used to trigger
+      // this, describes a parked element and would have switched enhancement
+      // off on a machine that was keeping up perfectly well.
+      const why = info.mediaVsWall < 0.97
+        ? `playback was falling behind real time (${info.mediaVsWall.toFixed(2)}×)`
+        : `about ${info.missRate}% of frames were not being enhanced in time`;
       if (state.watchQuality === 'quality' || state.watchQuality === 'maximum') {
         toast(
-          `Enhancement is dropping about ${info.dropRate}% of frames at ${info.sourceFps || '?'} fps. ` +
+          `Enhancement cannot hold the source cadence at ${info.sourceFps || '?'} fps — ${why}. ` +
           'Switch Playback quality to Auto to protect smooth motion.',
           'warn', 9000
         );
@@ -1024,8 +1032,8 @@
       state.engine.setParams({ enabled: false });
       updateEnhanceToggle();
       toast(
-        `Enhancement paused: this GPU could not keep up with a ${info.sourceFps || 'high'} fps source ` +
-        `(about ${info.dropRate}% of frames were being dropped). Playback is now native and smooth.`,
+        `Enhancement paused: this GPU could not hold a ${info.sourceFps || 'high'} fps source ` +
+        `(${why}). Playback is now native and smooth.`,
         'warn', 11000
       );
     };
@@ -1682,27 +1690,54 @@
       const v = el.video;
       const pb = state.playback ? state.playback.snapshot() : null;
 
+      const enhanced = state.presentation === 'enhanced';
+
+      /*
+       * Three clocks, labelled as three clocks.
+       *
+       * "Dropped" used to read `droppedVideoFrames` straight out of the media
+       * element in both paths. With the canvas as the picture the element is
+       * parked at 1x1 off-screen, and a measured A/B on the reference laptop
+       * put that counter at 0% while visible and 97.9% while parked, over the
+       * same clip, with media time advancing at exactly 1.0x throughout. It was
+       * counting frames an invisible element did not paint. Shown here only
+       * where it describes something, and never as the headline.
+       */
       const groups = [
-        ['Playback', [
-          ['Path', state.presentation === 'native' ? 'native — no GPU work' : 'enhanced'],
+        ['Media', [
+          ['Path', enhanced ? 'enhanced' : 'native — no GPU work'],
           ['Source', v.videoWidth ? `${v.videoWidth}×${v.videoHeight}` : '—'],
+          ['Source rate', s.sourceFps ? `${s.sourceFps} fps` : '—'],
           // Compositor-counted, not callback-counted: see playback-stats.js.
           ['Presented', pb ? `${pb.presentedFps} fps${pb.presentedBasis === 'callbacks' ? ' est.' : ''}` : '—'],
-          ['Dropped', pb ? `${pb.droppedFrames}/${pb.totalFrames} · ${pb.droppedPercent}%` : '—'],
+          // The cadence contract, measured. 1.000 means the clock kept time.
+          ['Media vs wall', enhanced ? `${s.mediaVsWall.toFixed(3)}×` : '—'],
           ['Jitter', pb ? `${pb.jitterMs} ms` : '—'],
           ['Buffer', pb ? `${pb.bufferedAheadSec}s` : '—']
         ]]
       ];
 
-      if (state.presentation === 'enhanced') {
-        const enhanced = [
+      if (enhanced) {
+        groups.push(['Enhancement', [
           ['Render', s.outputW ? `${s.outputW}×${s.outputH}` : '—'],
-          ['Frame cost', `${s.cpuMs} / ${s.frameBudgetMs} ms`],
-          ['Quality scale', `${Math.round(s.droppedScale * 100)}% · ${s.policy}`]
-        ];
-        if (s.skipped) enhanced.push(['Skipped', `${s.skipped} stale`]);
-        groups.push(['Enhancement', enhanced]);
+          ['Enhanced', `${s.enhancedFps} fps`],
+          // The GPU number is the real cost; the CPU one is submission time and
+          // under-reported by more than twenty times on the reference machine.
+          ['Frame cost', s.gpuTimingAvailable
+            ? `${s.gpuMs} ms GPU / ${s.frameBudgetMs} ms budget`
+            : `${s.cpuMs} ms CPU / ${s.frameBudgetMs} ms budget (no GPU timer)`],
+          ['Missed frames', `${s.missRate}%`],
+          ['Quality scale', `${Math.round(s.droppedScale * 100)}% · ${s.policy}`],
+          ['Scheduler', s.scheduler]
+        ]]);
       }
+
+      // Kept, but only where it means what it says.
+      groups.push(['Decoder', [
+        ['Decoder drops', s.decoderDropTrusted || !enhanced
+          ? (pb ? `${pb.droppedFrames}/${pb.totalFrames} · ${pb.droppedPercent}%` : '—')
+          : 'n/a — element parked off-screen']
+      ]]);
 
       groups.push(['Device', [['GPU', String(s.gpu).slice(0, 34)]]]);
 
@@ -5089,8 +5124,15 @@
        * a capable machine to Performance for a video it could have run at
        * Quality. So the drop rate only counts once playback has settled.
        */
+      // The miss rate, not the decoder's counter: Watch Auto used to pick a
+      // lower quality policy off a number that measured the parked element.
       playback: stats && stats.fps && el.video.currentTime > 3
-        ? { dropRate: stats.dropRate || 0, limited: !!stats.limited, fps: stats.fps }
+        ? {
+          dropRate: stats.missRate || 0,
+          mediaVsWall: stats.mediaVsWall,
+          limited: !!stats.limited,
+          fps: stats.fps
+        }
         : null,
       availableLooks: looks
     });

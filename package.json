@@ -39,7 +39,12 @@
     "verify:creator": "node tools/verify-creator.js",
     "verify:mux": "node --test tools/verify-mux.js",
     "verify:temporal": "node --test tools/verify-temporal.js",
-    "verify:framing": "node --test tools/verify-framing.js"
+    "verify:framing": "node --test tools/verify-framing.js",
+    "verify:cadence": "node --test tools/verify-cadence.js",
+    "verify:playback": "electron tools/verify-playback.js",
+    "measure:visibility": "electron tools/measure-video-visibility.js",
+    "measure:cadence": "electron tools/measure-present-cadence.js",
+    "measure:cost": "electron tools/measure-enhance-cost.js"
   },
   "keywords": [
     "video",

@@ -24,6 +24,10 @@
  * failure. It knows nothing about any stage's internals.
  */
 
+// The one shared resolver for what framing will do to the picture, so the
+// stage list cannot advertise a tracking pass the job manager will skip.
+const { resolveFramingPlan } = require('../recipe');
+
 const STAGE_IDS = [
   'ANALYSE',
   'RESTORE',
@@ -114,7 +118,15 @@ const DEFINITIONS = {
     weight: 0,
     applies: (r, _a, geometry) => r.framing.enabled && !!geometry &&
       (!!geometry.canvasWidth || !!r.framing.crop),
-    mode: (r) => (r.framing.tracking === 'auto' ? 'pass' : 'fused')
+    // A tracked crop is only a separate analysis pass when the tracker has
+    // something to steer. It measures a horizontal position, so a vertical
+    // trim - which is what a widening conversion needs - is fused centre
+    // framing, and the stage list must say so rather than advertising an
+    // analysis the job manager is about to skip.
+    mode: (r, _a, geometry) => {
+      if (r.framing.tracking !== 'auto') return 'fused';
+      return resolveFramingPlan(r, geometry || {}).cropAxis === 'x' ? 'pass' : 'fused';
+    }
   },
 
   GRADE: {

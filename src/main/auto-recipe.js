@@ -21,9 +21,10 @@
  */
 
 const recipes = require('./recipe');
-// Rates and thresholds only: `pipeline` is a pure module with no imports of its
-// own, and sharing its numbers is what stops Auto and the queue from
-// describing the same job differently.
+// Rates and thresholds only. Sharing the queue's own numbers is what stops Auto
+// and the queue from describing the same job differently; `pipeline` reaches no
+// further than `recipe`, which this module already depends on, so there is no
+// cycle to worry about.
 const pipeline = require('./jobs/pipeline');
 
 /** Creator-facing content profiles. */
@@ -174,6 +175,20 @@ const POLICY = {
 };
 
 const INTENSITY_FACTOR = { light: 0.55, balanced: 1, strong: 1.4, maximum: 1.8, custom: 1 };
+
+/**
+ * How much of a shape change Auto will hand to an anamorphic stretch instead of
+ * the crop.
+ *
+ * Deliberately small. Broadcast practice puts the point where a viewer starts
+ * to notice a horizontal stretch at around 5%, and faces are the first thing to
+ * give it away. At 3% nothing reads as distorted, and on a 16:9 -> 21:9
+ * conversion it hands back about three percent of the picture height a pure
+ * crop would have discarded. Closing that gap by stretch alone would need 33%,
+ * and splitting it evenly would still need 15%, so neither is on offer: the
+ * crop takes whatever the tolerance does not.
+ */
+const AUTO_STRETCH_TOLERANCE = 0.03;
 
 /* ------------------------------------------------------------------ *
  * User locks
@@ -392,20 +407,32 @@ function buildAutoRecipe({
    * Smart Reframe below: the whole frame is the content.
    */
   const srcRatio = srcW && srcH ? srcW / srcH : 1;
-  // A canvas without an explicit size still has a shape, and that shape is
-  // what decides whether the picture is reframed. Taking the ratio from the
-  // dimensions alone would read "9:16 at the source size" as no change at all.
+  /*
+   * A canvas without an explicit size still has a shape, and that shape is
+   * what decides whether the picture is reframed. Taking the ratio from the
+   * dimensions alone would read "9:16 at the source size" as no change at all
+   * - and, where a resolution disagrees with the ratio, would read the shape
+   * off the pair `resolveOutputGeometry()` is about to conform away.
+   */
   const canvasRatio = wantsCanvas
     ? recipes.aspectRatioOf(constraints.canvas,
       { aspectW: constraints.aspectW, aspectH: constraints.aspectH })
     : null;
-  const targetRatio = (constraints.width && constraints.height)
-    ? constraints.width / constraints.height
-    : (canvasRatio || srcRatio);
+  const targetRatio = canvasRatio ||
+    ((constraints.width && constraints.height) ? constraints.width / constraints.height : srcRatio);
   const reshapes = wantsCanvas && Math.abs(srcRatio - targetRatio) > 0.02;
   const sourceIsWider = srcRatio > targetRatio;
   const trackable = profile !== 'screencast';
-  const willCrop = reshapes && sourceIsWider && !!engines.reframe && trackable;
+  /*
+   * This used to require `sourceIsWider` as well - that is, it only considered
+   * cropping when the *target* was the narrower shape. For 16:9 into 21:9 the
+   * target is the wider one, so the test was false, framing fell through to
+   * `fit`, and a 1920x1080 picture was pillarboxed inside a 2560x1080 canvas:
+   * an ultrawide container around a 16:9 picture, which is not an ultrawide
+   * conversion at all. Cropping to fill is the right answer in both
+   * directions; only the axis differs.
+   */
+  const willCrop = reshapes && trackable;
   /** The linear factor the picture is scaled by, after any crop. */
   const climb = (!srcW || !srcH || !targetW || !targetH)
     ? 1
@@ -688,46 +715,29 @@ function buildAutoRecipe({
     }
     const where = constraints.label;
     /*
-     * Smart Reframe is not a default; it is a decision.
+     * Choosing a shape is choosing to *see* the picture in that shape.
      *
-     * A tracked crop is right when there is a subject that moves inside the
-     * frame. On a screencast there is no such subject - the whole frame is the
-     * subject - and a tracker following the mouse pointer around a UI is a
-     * worse result than a stable crop. So a synthetic source keeps the picture
-     * whole and says why. `trackable` and `sourceIsWider` were decided above,
-     * because how far the picture has to be enlarged depends on whether it is
-     * about to be cropped.
+     * The old rule was "crop if the source is wider, otherwise fit", which
+     * meant half of all conversions silently produced bars. Auto now fills the
+     * canvas whenever the shape changes, and the remaining question is only
+     * how the picture is placed inside it. A deliberate Fit is still available
+     * from the Framing control, and is still what Auto chooses for content
+     * where the edges of the frame *are* the content.
+     *
+     * `trackable` and `sourceIsWider` were decided above, because how far the
+     * picture has to be enlarged depends on whether it is about to be cropped.
      */
-    if (sourceIsWider && engines.reframe && trackable) {
-      framing.mode = 'fill';
-      framing.tracking = 'auto';
-      // Say which backend will actually run. Promising face tracking on a
-      // machine with no models installed is the kind of small lie the
-      // telemetry work exists to prevent.
-      const semanticProfiles = ['film', 'dialogue', 'action', 'auto', 'lowlight'];
-      const semanticWanted = engines.semanticReframe && semanticProfiles.includes(profile);
-      if (semanticWanted) {
-        explanations.push(
-          `${where}: Smart Reframe enabled with face and person tracking, ` +
-          'so a subject who is standing still is not lost to a busy background.'
-        );
-      } else if (engines.semanticReframe && profile === 'gaming') {
-        // A webcam face is not the subject of a gameplay clip.
-        explanations.push(
-          `${where}: Smart Reframe enabled following the game action; ` +
-          'face tracking is available but is not assumed to be the subject here.'
-        );
-      } else {
-        explanations.push(
-          `${where}: Smart Reframe enabled so the subject stays in the ${constraints.canvas} crop.`
-        );
-        if (!engines.semanticReframe) {
-          explanations.push(
-            'Face and person detection is not installed, so tracking follows motion and detail.'
-          );
-        }
-      }
-    } else if (sourceIsWider && !trackable) {
+    if (!reshapes) {
+      framing.mode = 'fit';
+      framing.tracking = 'none';
+      // Name the shape. "Source fits the canvas without cropping" is true and
+      // uninformative when the size class already implied a different shape -
+      // see the note in summarise() about 2560x1080 reporting as "1440p".
+      explanations.push(
+        `${where}: the source is already ${recipes.describeAspectRatio(srcRatio) || 'this shape'}, ` +
+        'so it fits the canvas without cropping or padding.'
+      );
+    } else if (!trackable) {
       // Fit rather than crop: on a screencast the edges of the frame are
       // content, and cropping them away loses the thing being demonstrated.
       framing.mode = 'fit';
@@ -737,18 +747,64 @@ function buildAutoRecipe({
         `${where}: this is synthetic screen content, so the whole frame is kept and ` +
         'letterboxed rather than tracked — a crop would cut off part of the screen.'
       );
-    } else if (sourceIsWider) {
-      framing.mode = 'fit';
-      framing.tracking = 'center';
-      cannot(
-        'framing',
-        'Smart Reframe',
-        'Subject tracking is unavailable, so the crop is centred and letterboxed.',
-        null
-      );
     } else {
-      framing.mode = 'fit';
-      explanations.push(`${where}: source fits the canvas without cropping.`);
+      framing.mode = 'fill';
+      // A little anamorphic give, so the crop does not have to absorb the whole
+      // shape change on its own. See AUTO_STRETCH_TOLERANCE for why it is this
+      // small and no smaller.
+      framing.stretchTolerance = AUTO_STRETCH_TOLERANCE;
+
+      if (!sourceIsWider) {
+        /*
+         * The canvas is the wider shape, so the trim is vertical - and the
+         * tracker measures a horizontal position and nothing else. Putting a
+         * Smart Reframe label on a crop the tracker cannot steer would be the
+         * same class of claim as promising face detection with no models
+         * installed, so this is a centred vertical crop and says so.
+         */
+        framing.tracking = 'center';
+        explanations.push(
+          `${where}: the canvas is wider than the source, so the picture is cropped top and ` +
+          'bottom to fill it rather than floated between bars. The crop is centred — subject ' +
+          'tracking follows a horizontal position, which a vertical trim cannot use.'
+        );
+      } else if (engines.reframe) {
+        framing.tracking = 'auto';
+        // Say which backend will actually run. Promising face tracking on a
+        // machine with no models installed is the kind of small lie the
+        // telemetry work exists to prevent.
+        const semanticProfiles = ['film', 'dialogue', 'action', 'auto', 'lowlight'];
+        const semanticWanted = engines.semanticReframe && semanticProfiles.includes(profile);
+        if (semanticWanted) {
+          explanations.push(
+            `${where}: Smart Reframe enabled with face and person tracking, ` +
+            'so a subject who is standing still is not lost to a busy background.'
+          );
+        } else if (engines.semanticReframe && profile === 'gaming') {
+          // A webcam face is not the subject of a gameplay clip.
+          explanations.push(
+            `${where}: Smart Reframe enabled following the game action; ` +
+            'face tracking is available but is not assumed to be the subject here.'
+          );
+        } else {
+          explanations.push(
+            `${where}: Smart Reframe enabled so the subject stays in the ${constraints.canvas} crop.`
+          );
+          if (!engines.semanticReframe) {
+            explanations.push(
+              'Face and person detection is not installed, so tracking follows motion and detail.'
+            );
+          }
+        }
+      } else {
+        framing.tracking = 'center';
+        cannot(
+          'framing',
+          'Smart Reframe',
+          'Subject tracking is unavailable, so the crop is centred.',
+          'The picture still fills the canvas; only the crop position is fixed rather than tracked.'
+        );
+      }
     }
   }
 
@@ -907,6 +963,44 @@ function buildAutoRecipe({
     );
   }
 
+  /*
+   * What the framing will actually do, read back off the finished recipe.
+   *
+   * Everything above is intent. This is the resolved contract the filter graph
+   * builds from and the output verifier asserts against, so Auto's account of
+   * the framing cannot describe something other than what runs — which is
+   * exactly how a summary once said "Fit, blurred background" over a file with
+   * solid black bars.
+   */
+  const framingPlan = recipes.resolveFramingPlan(recipe, geometry);
+  if (framingPlan.active && framingPlan.fills) {
+    const bits = [];
+    const lostAxis = framingPlan.cropAxis;
+    const lost = lostAxis === 'x'
+      ? Math.round((1 - framingPlan.keepWidth) * 100)
+      : lostAxis === 'y' ? Math.round((1 - framingPlan.keepHeight) * 100) : 0;
+    if (lost > 0) bits.push(`${lost}% of the ${lostAxis === 'x' ? 'width' : 'height'} is cropped away`);
+    if (framingPlan.stretch > 1.0005) {
+      bits.push(
+        `a ${((framingPlan.stretch - 1) * 100).toFixed(1)}% ` +
+        `${framingPlan.stretchAxis === 'x' ? 'horizontal' : 'vertical'} stretch takes the rest`
+      );
+    }
+    if (bits.length) {
+      explanations.push(
+        `Filling ${geometry.width}×${geometry.height}: ${bits.join('; ')}. ` +
+        'The picture reaches every edge of the frame — no bars.'
+      );
+    }
+  } else if (framingPlan.active && !framingPlan.fills) {
+    explanations.push(
+      `The whole frame is kept, so a ${framingPlan.activeWidth}×${framingPlan.activeHeight} ` +
+      `picture sits inside the ${geometry.width}×${geometry.height} canvas with ` +
+      `${framingPlan.background === 'blur' ? 'a blurred copy of the frame' : 'black'} ` +
+      `${framingPlan.barAxis === 'x' ? 'either side' : 'above and below'}.`
+    );
+  }
+
   return {
     recipe,
     explanations,
@@ -931,6 +1025,23 @@ function buildAutoRecipe({
       interpolation: recipe.motion.interpolation,
       tracking: recipe.framing.tracking,
       framingMode: recipe.framing.enabled ? recipe.framing.mode : null,
+      /**
+       * The resolved framing contract, so the UI and the tests can ask whether
+       * the picture fills the frame instead of inferring it from a mode name.
+       */
+      framing: framingPlan.active ? {
+        mode: framingPlan.mode,
+        background: framingPlan.background,
+        fills: framingPlan.fills,
+        cropAxis: framingPlan.cropAxis,
+        barAxis: framingPlan.barAxis,
+        keepWidth: framingPlan.keepWidth,
+        keepHeight: framingPlan.keepHeight,
+        stretch: framingPlan.stretch,
+        stretchAxis: framingPlan.stretchAxis,
+        activeWidth: framingPlan.activeWidth,
+        activeHeight: framingPlan.activeHeight
+      } : null,
       grade: policy.grade,
       semanticTracking: recipe.framing.tracking === 'auto' && !!engines.semanticReframe,
       audioMaster: recipe.audio.master,
@@ -1223,8 +1334,22 @@ function summarise(result, analysis) {
   const srcFps = v.nominalFps || null;
   const dec = result.decisions;
 
+  /*
+   * The source's *shape*, said out loud.
+   *
+   * A size class alone is not a description of a source, and for anything
+   * ultrawide it actively misleads: `resolutionClass()` measures the long edge,
+   * so a 2560x1080 21:9 file reports "1440p" — indistinguishable from a
+   * 2560x1440 16:9 one. A user reading "1440p · 60 fps · clean" above a 21:9
+   * output reasonably concluded Visionance had failed to convert a 16:9 source,
+   * when the source was already 21:9 and there was nothing to convert. The
+   * framing was right and the sentence describing it was not.
+   */
+  const sourceShape = srcW && srcH ? recipes.describeAspectRatio(srcW / srcH) : null;
+
   const sourceBits = [];
   if (srcW && srcH) sourceBits.push(d.resolutionClass || `${srcH}p`);
+  if (sourceShape) sourceBits.push(sourceShape);
   if (srcFps) sourceBits.push(`${srcFps} fps`);
   sourceBits.push(QUALITY_LABEL[dec.sourceQuality.level] || dec.sourceQuality.level);
 
@@ -1267,14 +1392,38 @@ function summarise(result, analysis) {
   }
 
   if (r.framing.enabled) {
+    /*
+     * Read off the resolved plan, not the mode name. "Fit, blurred background"
+     * was once shown for a render that produced solid black bars, and "Centre
+     * crop" says nothing about which way the crop went or what it cost.
+     */
+    const fr = dec.framing;
+    const lost = fr && fr.cropAxis === 'x'
+      ? `${Math.round((1 - fr.keepWidth) * 100)}% of the width`
+      : fr && fr.cropAxis === 'y'
+        ? `${Math.round((1 - fr.keepHeight) * 100)}% of the height`
+        : null;
+    const stretched = fr && fr.stretch > 1.0005
+      ? `${((fr.stretch - 1) * 100).toFixed(1)}% stretch`
+      : null;
+    const cost = [lost && `${lost} cropped`, stretched].filter(Boolean).join(' + ');
+
     if (r.framing.tracking === 'auto') {
       add(`Smart Reframe — ${dec.semanticTracking ? 'face + person' : 'motion + detail'}`,
         dec.semanticTracking ? null : 'the optional detector is not installed');
     } else if (r.framing.mode === 'fill') {
-      add('Centre crop', 'the picture is cropped to the new shape');
+      add(fr && fr.cropAxis === 'y' ? 'Crop to fill (top and bottom)' : 'Centre crop',
+        cost ? `the picture fills the frame — ${cost}` : 'the picture fills the frame');
+    } else if (r.framing.mode === 'stretch') {
+      add('Stretch to fill', 'aspect ratio is not preserved');
     } else {
+      // "It already fits" is only useful if it says *what* it fits. Without the
+      // shape this line reads as a refusal to convert rather than as the
+      // statement that there is nothing to convert.
       add(r.framing.background === 'black' ? 'Fit, black bars' : 'Fit, blurred background',
-        'the whole frame is kept');
+        fr && fr.fills
+          ? `the source is already ${sourceShape || 'this shape'}, so nothing is cropped or padded`
+          : `the whole frame is kept — ${fr && fr.barAxis === 'x' ? 'bars either side' : 'bars above and below'}`);
     }
   }
 
@@ -1285,7 +1434,7 @@ function summarise(result, analysis) {
 
   return {
     source: { width: srcW, height: srcH, fps: srcFps, quality: dec.sourceQuality.level,
-      label: sourceBits.join(' · ') },
+      shape: sourceShape, label: sourceBits.join(' · ') },
     output: { resolution: dec.outputResolution, fps: dec.outputFps, label: outBits.join(' · ') },
     chose,
     cost: result.cost,

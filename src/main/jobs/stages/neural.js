@@ -519,6 +519,8 @@ async function processChunk({ ctx, chunk, aiPlan, dirs, report }) {
     recipe,
     control,
     filters: post.filters.length ? post.filters.join(',') : null,
+    graph: post.graph || null,
+    outputLabel: post.outputLabel || 'vout',
     onProgress: (p) => report('encode', p.fraction || 0)
   });
   fs.renameSync(chunkTmp, chunkFile);

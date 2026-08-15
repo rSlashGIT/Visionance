@@ -145,7 +145,13 @@ async function extractFrames({
  * after the per-shot RIFE outputs are stitched together.
  */
 async function encodeFrames({
-  ffmpeg, framesDir, fps, output, encoderId, recipe, control, onProgress, filters = null
+  ffmpeg, framesDir, fps, output, encoderId, recipe, control, onProgress, filters = null,
+  /**
+   * A labelled `-filter_complex` graph, for framing that needs `split` and
+   * `overlay`. Without this the blurred-background composite had nowhere to go
+   * in the neural path and was silently replaced by black bars.
+   */
+  graph = null, outputLabel = 'vout'
 }) {
   const args = [
     '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
@@ -154,7 +160,8 @@ async function encodeFrames({
     '-i', path.join(framesDir, FRAME_PATTERN)
   ];
 
-  if (filters) args.push('-vf', filters);
+  if (graph) args.push('-filter_complex', graph, '-map', `[${outputLabel}]`);
+  else if (filters) args.push('-vf', filters);
 
   args.push(...encoderArgs(encoderId, {
     quality: recipe.output.quality,

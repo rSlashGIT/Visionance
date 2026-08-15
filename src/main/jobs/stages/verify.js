@@ -14,8 +14,11 @@
  */
 
 const fs = require('fs');
+const { spawn } = require('child_process');
 const { analyze } = require('../../media-analyzer');
-const { aspectRatioOf } = require('../../recipe');
+const {
+  aspectRatioOf, resolveFramingPlan, describeAspectRatio, RATIO_NAME_TOLERANCE
+} = require('../../recipe');
 const { VisionanceError, CODES } = require('../../errors');
 
 const MIN_BYTES = 4096;
@@ -24,25 +27,115 @@ const DURATION_TOLERANCE_RATIO = 0.05;
 const DURATION_TOLERANCE_SECONDS = 1.5;
 const FPS_TOLERANCE = 0.75;
 /**
- * Even-pixel rounding moves a ratio slightly: 2560x1080 is 2.3704 against a
- * nominal 2.3704, but 3840x1608 is 2.3881 against 2.39. A tolerance of 0.02
- * accepts that and still rejects 16:9 (1.778) standing in for 21:9 (2.370).
+ * Even-pixel rounding moves a ratio slightly, so an exact comparison would
+ * reject good output. Shared with the ratio namer in `recipe.js` — two lists of
+ * "what counts as 21:9" is one list too many.
  */
-const ASPECT_TOLERANCE = 0.02;
+const ASPECT_TOLERANCE = RATIO_NAME_TOLERANCE;
 /** Audio that stops early is as broken as audio that never existed. */
 const AUDIO_DRIFT_SECONDS = 1.5;
-
-const KNOWN_RATIOS = [
-  [16 / 9, '16:9'], [9 / 16, '9:16'], [4 / 5, '4:5'], [1, '1:1'],
-  [64 / 27, '21:9'], [2.39, '2.39:1'], [4 / 3, '4:3'], [3 / 2, '3:2']
-];
+/**
+ * How short of the frame the visible picture may fall before a contract that
+ * promised to fill it is considered broken.
+ *
+ * Generous on purpose. The failure this exists for left the picture 25% short
+ * on one axis - 1920 of 2560 pixels - so nothing subtle needs catching, and a
+ * loose threshold keeps a genuinely dark edge or a one-pixel rounding from
+ * failing an otherwise good render.
+ */
+const FILL_TOLERANCE = 0.05;
 
 /** Name a ratio the way the user chose it, so a failure reads plainly. */
-function describeRatio(ratio) {
-  for (const [value, label] of KNOWN_RATIOS) {
-    if (Math.abs(ratio - value) < ASPECT_TOLERANCE) return label;
+const describeRatio = describeAspectRatio;
+
+/* ------------------------------------------------------------------ *
+ * Active picture
+ *
+ * The check that did not exist.
+ *
+ * A render asked for 21:9 at 2K produced a file that probed as 2560x1080, SAR
+ * 1:1, DAR 64:27 — correct by every measure the verifier had — whose visible
+ * content was a 1920x1080 16:9 picture with 320 px of black either side. The
+ * container was ultrawide and the picture was not. Nothing downstream could
+ * tell, because nothing downstream ever looked at a pixel.
+ * ------------------------------------------------------------------ */
+
+/**
+ * One cropdetect pass over a window of the file.
+ *
+ * `reset=0` accumulates the union of non-black content across every frame it
+ * sees, so a bar that is black for the whole window is reported while a single
+ * dark shot cannot shrink the answer. Resolves null on any failure: an
+ * unmeasurable picture is not the same claim as a broken one.
+ */
+function runCropDetect({ ffmpeg, filePath, startSeconds = 0, durationSeconds = 0, fps = 4, timeoutMs = 20000 }) {
+  return new Promise((resolve) => {
+    const args = ['-hide_banner', '-nostdin', '-v', 'info'];
+    if (startSeconds > 0) args.push('-ss', String(startSeconds));
+    args.push('-i', filePath);
+    if (durationSeconds > 0) args.push('-t', String(durationSeconds));
+    args.push('-vf', `fps=${fps},cropdetect=limit=24:round=2:reset=0`);
+    args.push('-an', '-sn', '-dn', '-f', 'null', '-');
+
+    let proc;
+    try {
+      proc = spawn(ffmpeg, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    } catch {
+      return resolve(null);
+    }
+    let err = '';
+    const timer = setTimeout(() => { try { proc.kill(); } catch { /* gone */ } }, timeoutMs);
+    proc.stderr.on('data', (c) => {
+      err += c.toString();
+      if (err.length > 400000) err = err.slice(-200000);
+    });
+    proc.on('error', () => { clearTimeout(timer); resolve(null); });
+    proc.on('close', () => {
+      clearTimeout(timer);
+      const found = [...err.matchAll(/crop=(\d+):(\d+):(-?\d+):(-?\d+)/g)];
+      if (!found.length) return resolve(null);
+      const last = found[found.length - 1];
+      resolve({
+        width: Number(last[1]), height: Number(last[2]),
+        x: Number(last[3]), y: Number(last[4])
+      });
+    });
+  });
+}
+
+/**
+ * The rectangle the picture actually occupies inside the frame.
+ *
+ * Sampled from two short windows rather than the whole file, and never from
+ * the very start: padding introduced by a filter graph is in every frame, so a
+ * dozen seconds of video answers the question, while an opening fade taken
+ * alone would answer a different one. Bounded work regardless of how long the
+ * render is.
+ *
+ * @returns {Promise<{x,y,width,height,windows}|null>} null when unmeasurable
+ */
+async function measureActivePicture({ ffmpeg, filePath, durationSeconds = 0 }) {
+  if (!ffmpeg || !filePath) return null;
+  const d = Number(durationSeconds) || 0;
+  const windows = d > 20
+    ? [{ start: d * 0.1, length: 6 }, { start: d * 0.55, length: 6 }]
+    : [{ start: 0, length: 0 }];
+
+  const rects = [];
+  for (const w of windows) {
+    // eslint-disable-next-line no-await-in-loop
+    const r = await runCropDetect({
+      ffmpeg, filePath, startSeconds: w.start, durationSeconds: w.length
+    });
+    if (r && r.width > 0 && r.height > 0) rects.push(r);
   }
-  return `${ratio.toFixed(2)}:1`;
+  if (!rects.length) return null;
+
+  const left = Math.min(...rects.map((r) => r.x));
+  const top = Math.min(...rects.map((r) => r.y));
+  const right = Math.max(...rects.map((r) => r.x + r.width));
+  const bottom = Math.max(...rects.map((r) => r.y + r.height));
+  return { x: left, y: top, width: right - left, height: bottom - top, windows: rects.length };
 }
 
 /**
@@ -132,6 +225,71 @@ async function runVerify(ctx) {
         Math.abs(actual - wanted) <= ASPECT_TOLERANCE,
         `${describeRatio(wanted)} (${wanted.toFixed(3)})`,
         `${describeRatio(actual)} (${actual.toFixed(3)})`
+      );
+    }
+  }
+
+  /* ---- the picture inside the frame ----
+   *
+   * Driven by the *resolved framing contract*, not by a guess about what
+   * bars mean. A Fit was asked to keep the whole frame, so its bars are the
+   * feature; a Fill/Smart Reframe/Stretch promised the picture reaches every
+   * edge, and a picture that does not is the failure this whole check exists
+   * for. Reporting one rule for both would either bless the broken render or
+   * condemn a legitimate one.
+   */
+  const framing = geometry ? resolveFramingPlan(recipe, geometry) : null;
+  if (framing && framing.active && ctx.bins && ctx.bins.ffmpeg &&
+      analysis.derived.displayWidth && analysis.derived.displayHeight) {
+    report(0.7, 'Checking the picture fills the frame');
+    const w = analysis.derived.displayWidth;
+    const h = analysis.derived.displayHeight;
+    const active = await measureActivePicture({
+      ffmpeg: ctx.bins.ffmpeg,
+      filePath,
+      durationSeconds: analysis.container.duration
+    });
+
+    /*
+     * A picture measuring smaller than a quarter of the frame is far more
+     * likely to be a dark passage than a framing fault: the failure this check
+     * exists for still filled three quarters of the width and all of the
+     * height. Below that the measurement is not trusted rather than believed.
+     */
+    const plausible = active && (active.width * active.height) >= (w * h) * 0.25;
+
+    if (!active || !plausible) {
+      // Not measurable is not the same as wrong.
+      add('picture fills the frame', true, 'a measurable picture',
+        active ? 'too dark to measure' : 'not measurable', false);
+    } else if (framing.fills) {
+      const fill = Math.min(active.width / w, active.height / h);
+      const short = fill < 1 - FILL_TOLERANCE;
+      add(
+        'picture fills the frame',
+        !short,
+        `${w}×${h} of picture (${framing.mode} fills the canvas)`,
+        short
+          ? `${active.width}×${active.height} of picture with ${Math.round((1 - fill) * 100)}% ` +
+            'unused border — the canvas is the right shape but the picture is not filling it. ' +
+            'If the source itself has bars baked into the frame, choose Fit to keep them ' +
+            'deliberately, or crop them off before rendering'
+          : `${active.width}×${active.height}`
+      );
+    } else {
+      // A deliberate Fit: the picture is *meant* to sit inside bars, so the
+      // question is whether it is the size the contract predicted.
+      const wantW = framing.activeWidth || w;
+      const wantH = framing.activeHeight || h;
+      const off = Math.max(Math.abs(active.width - wantW) / w, Math.abs(active.height - wantH) / h);
+      add(
+        'kept picture is the size the fit predicted',
+        // A blurred background legitimately reaches the edges, so a measured
+        // full frame there says nothing and must not be read as a failure.
+        off <= FILL_TOLERANCE || framing.background === 'blur',
+        `${wantW}×${wantH} inside a ${w}×${h} canvas`,
+        `${active.width}×${active.height}`,
+        false
       );
     }
   }
@@ -229,4 +387,4 @@ function verificationError(result) {
   });
 }
 
-module.exports = { runVerify, verificationError };
+module.exports = { runVerify, verificationError, measureActivePicture, FILL_TOLERANCE };

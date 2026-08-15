@@ -30,7 +30,7 @@
     "verify:auto-ui": "electron tools/verify-auto-ui.js",
     "verify:audio": "electron tools/verify-audio.js",
     "verify:release": "electron tools/verify-release.js",
-    "verify": "npm run verify:core && npm run verify:watch && npm run verify:create && npm run verify:auto && npm run verify:reframe && npm run verify:gl && npm run verify:export && npm run verify:ai && npm run verify:creator && npm run verify:switch && npm run verify:app && npm run verify:ui && npm run verify:seek && npm run verify:picture && npm run verify:create-preview && npm run verify:auto-ui && npm run verify:chrome",
+    "verify": "npm run verify:core && npm run verify:watch && npm run verify:create && npm run verify:auto && npm run verify:framing && npm run verify:contract && npm run verify:mux && npm run verify:temporal && npm run verify:reframe && npm run verify:gl && npm run verify:export && npm run verify:ai && npm run verify:creator && npm run verify:switch && npm run verify:app && npm run verify:ui && npm run verify:seek && npm run verify:picture && npm run verify:create-preview && npm run verify:auto-ui && npm run verify:chrome",
     "launch": "node tools/launcher.js",
     "stop": "node tools/launcher.js --stop",
     "doctor": "node tools/launcher.js --doctor",
@@ -38,7 +38,8 @@
     "verify:ai:core": "node tools/verify-ai.js --core",
     "verify:creator": "node tools/verify-creator.js",
     "verify:mux": "node --test tools/verify-mux.js",
-    "verify:temporal": "node --test tools/verify-temporal.js"
+    "verify:temporal": "node --test tools/verify-temporal.js",
+    "verify:framing": "node --test tools/verify-framing.js"
   },
   "keywords": [
     "video",

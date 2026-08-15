@@ -16,6 +16,8 @@
  * happens after grading because grading is what exposes the banding.
  */
 
+const { resolveFramingPlan } = require('../recipe');
+
 const round3 = (n) => Math.round(n * 1000) / 1000;
 const even = (n) => {
   const v = Math.max(2, Math.round(n));
@@ -182,36 +184,57 @@ function canvasStep(recipe, geometry, has, opts = {}) {
   }
 
   if (recipe.framing.mode === 'fill') {
-    // Smart Reframe: crop first, at the subject's position, then scale. Doing it
-    // in this order means the crop window tracks the subject in *source*
-    // coordinates, which is what the trajectory was measured in.
+    /*
+     * Crop to the target shape, then one scale onto the canvas.
+     *
+     * The crop used to be `w=min(iw, ih*R):h=ih` - width only. That is correct
+     * for the case it was written for, 16:9 into 9:16, and a no-op for the
+     * opposite one: a 16:9 picture going to 21:9 is already narrower than
+     * `ih*R`, so `min()` returned the full width, nothing was cropped, and the
+     * scale that followed stretched the frame across the canvas. Taking the
+     * largest rectangle of the wanted shape that the picture holds - trimming
+     * whichever axis is long - is the same operation in both directions.
+     *
+     * Crop before scale, not after: the tracked x expression is in *source*
+     * coordinates, which is what the trajectory was measured in.
+     */
+    const plan = resolveFramingPlan(recipe, geometry);
+    const ratio = round3(plan.cropRatio || (w / h));
     const reframe = opts.reframe;
-    if (recipe.framing.tracking === 'auto' && reframe && reframe.expr) {
-      const cropW = `ih*${round3(reframe.cropWidthFraction)}*${round3(w / h)}`;
-      return {
-        kind: 'linear',
-        filters: [
-          `crop=w=min(iw\\,ih*${round3(w / h)}):h=ih:x='min(max(${reframe.expr}\\,0)\\,iw-ow)':y=0`,
-          `scale=${w}:${h}:flags=${flags}`
-        ],
-        // Geometry only. Whether the tracking *succeeded* is not something a
-        // filter builder can know - it can only see whether the compiled
-        // expression is a constant - and claiming it here is how a job ended
-        // up saying "the crop follows the subject" next to "the subject could
-        // not be located". The outcome is summarised once, in tracking.js.
-        note: reframe.static
-          ? `Smart Reframe crop into ${w}×${h}, fixed for the whole clip.`
-          : `Smart Reframe crop into ${w}×${h}, moving across ${reframe.points} keyed positions.`,
-        unusedCropW: cropW
-      };
-    }
+    // The tracker measures a horizontal position and nothing else, so it can
+    // only steer a crop that trims width. On a vertical trim its trajectory
+    // has nothing to say, and pretending otherwise would put a Smart Reframe
+    // label on a centred crop.
+    const tracked = recipe.framing.tracking === 'auto' && !!(reframe && reframe.expr) &&
+      plan.cropAxis === 'x';
+    const x = tracked ? `'min(max(${reframe.expr}\\,0)\\,iw-ow)'` : '(iw-ow)/2';
+
+    const kept = plan.cropAxis === 'x'
+      ? `${Math.round((1 - plan.keepWidth) * 100)}% of the width`
+      : plan.cropAxis === 'y'
+        ? `${Math.round((1 - plan.keepHeight) * 100)}% of the height`
+        : null;
+    const stretchNote = plan.stretch > 1.0005
+      ? ` A ${((plan.stretch - 1) * 100).toFixed(1)}% ${plan.stretchAxis === 'x' ? 'horizontal' : 'vertical'} ` +
+        'stretch absorbs the rest of the shape change.'
+      : '';
+
     return {
       kind: 'linear',
       filters: [
-        `scale=${w}:${h}:force_original_aspect_ratio=increase:flags=${flags}`,
-        `crop=${w}:${h}`
+        `crop=w=min(iw\\,ih*${ratio}):h=min(ih\\,iw/${ratio}):x=${x}:y=(ih-oh)/2`,
+        `scale=${w}:${h}:flags=${flags}`
       ],
-      note: `Centre-cropped to fill a ${w}×${h} canvas.`
+      // Geometry only. Whether the tracking *succeeded* is not something a
+      // filter builder can know - it can only see whether the compiled
+      // expression is a constant - and claiming it here is how a job ended
+      // up saying "the crop follows the subject" next to "the subject could
+      // not be located". The outcome is summarised once, in tracking.js.
+      note: tracked
+        ? (reframe.static
+          ? `Smart Reframe crop into ${w}×${h}, fixed for the whole clip.${stretchNote}`
+          : `Smart Reframe crop into ${w}×${h}, moving across ${reframe.points} keyed positions.${stretchNote}`)
+        : `Centre-cropped to fill a ${w}×${h} canvas${kept ? `, losing ${kept}` : ''}.${stretchNote}`
     };
   }
 
@@ -406,7 +429,13 @@ function buildPreNeuralFilters(recipe, analysis, opts = {}) {
 
 /**
  * Filters applied when encoding the processed frames back to video.
+ *
+ * Returns either a flat `-vf` chain or, when the framing needs `split`/
+ * `overlay`, a labelled `-filter_complex` graph. Both forms are handled by
+ * `frames.encodeFrames()`.
+ *
  * @param {object} frameSize { width, height } of the frames coming out of the engines
+ * @returns {{filters:string[], graph:string|null, outputLabel:string|null, notes:string[]}}
  */
 function buildPostNeuralFilters(recipe, geometry, frameSize, opts = {}) {
   const available = opts.availableFilters instanceof Set ? opts.availableFilters : null;
@@ -415,12 +444,22 @@ function buildPostNeuralFilters(recipe, geometry, frameSize, opts = {}) {
   const notes = [];
   const flags = SWS_FLAGS[recipe.reconstruction.resampler] || SWS_FLAGS.lanczos;
 
-  // Bring the network's native output down (or up) to what the recipe asked
-  // for. This is the step that makes "AI Restore at source resolution" and
-  // "2x from a 4x-only model" honest rather than imaginary.
+  /*
+   * Bring the network's native output down (or up) to what the recipe asked
+   * for. This is the step that makes "AI Restore at source resolution" and
+   * "2x from a 4x-only model" honest rather than imaginary.
+   *
+   * It is skipped when framing owns the resample, for the same reason
+   * `resolveOutputGeometry()` holds `scaleWidth` at the source there: with a
+   * canvas active this scale targets the *source* size, so it would take a
+   * 3840x2160 network output, throw it back down to 1920x1080, and hand the
+   * canvas step a picture it then has to enlarge again to 2560x1080. One
+   * resample, from the largest picture available, is both correct and better.
+   */
+  const framesToCanvas = !!(geometry.framesToCanvas && geometry.canvasWidth && geometry.canvasHeight);
   const targetW = geometry.scaleWidth || geometry.width;
   const targetH = geometry.scaleHeight || geometry.height;
-  if (targetW && targetH && frameSize &&
+  if (!framesToCanvas && targetW && targetH && frameSize &&
       (frameSize.width !== targetW || frameSize.height !== targetH)) {
     filters.push(`scale=${targetW}:${targetH}:flags=${flags}`);
     const direction = frameSize.width > targetW ? 'downscaled' : 'scaled';
@@ -428,29 +467,41 @@ function buildPostNeuralFilters(recipe, geometry, frameSize, opts = {}) {
       `Network output ${frameSize.width}x${frameSize.height} ${direction} to ${targetW}x${targetH} with ` +
       `${recipe.reconstruction.resampler}.`
     );
+  } else if (framesToCanvas && frameSize) {
+    notes.push(
+      `Network output ${frameSize.width}x${frameSize.height} taken straight into the ` +
+      `${geometry.canvasWidth}x${geometry.canvasHeight} canvas — one resample, not two.`
+    );
   }
 
   const canvas = canvasStep(recipe, geometry, has, opts);
-  if (canvas.kind === 'linear') {
-    filters.push(...canvas.filters);
-    notes.push(canvas.note);
-  } else if (canvas.kind === 'composite') {
-    // The blurred-background composite needs a labelled graph, which a plain
-    // -vf chain cannot express; fall back to the flat letterbox here.
-    const w = geometry.canvasWidth;
-    const h = geometry.canvasHeight;
-    filters.push(
-      `scale=${w}:${h}:force_original_aspect_ratio=decrease:flags=${flags}`,
-      `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black`
-    );
-    notes.push(`Letterboxed into a ${w}x${h} canvas on black.`);
+  const tail = [...colorFilters(recipe), ...finishFilters(recipe), 'format=yuv420p'];
+
+  if (canvas.kind !== 'composite') {
+    if (canvas.kind === 'linear') {
+      filters.push(...canvas.filters);
+      notes.push(canvas.note);
+    }
+    filters.push(...tail);
+    return { filters, graph: null, outputLabel: null, notes };
   }
 
-  filters.push(...colorFilters(recipe));
-  filters.push(...finishFilters(recipe));
-  filters.push('format=yuv420p');
+  /*
+   * The blurred-background composite needs `split` and `overlay`, which a flat
+   * `-vf` chain cannot express. This used to substitute a black `pad` and say
+   * so only in a note nobody reads - so a job whose summary said "Fit, blurred
+   * background" produced solid black bars whenever a neural stage was in the
+   * plan, which for any RIFE render is always. Emitting the whole post chain as
+   * a labelled graph makes the label true instead.
+   */
+  const g = new GraphBuilder(opts.inputLabel || '0:v');
+  filters.forEach((f) => g.add(f));
+  canvas.build(g);
+  notes.push(canvas.note);
+  tail.forEach((f) => g.add(f));
 
-  return { filters, notes };
+  const outputLabel = opts.outputLabel || 'vout';
+  return { filters: [], graph: g.finish(outputLabel), outputLabel, notes };
 }
 
 /**

@@ -624,8 +624,28 @@ class JobManager extends EventEmitter {
 
       /* ---- Smart Reframe: measure where the subject is ---- */
       let reframe = null;
+      /*
+       * The tracker produces a horizontal trajectory, so it can only steer a
+       * crop that trims *width*. Asked for 21:9 from a 16:9 source the trim is
+       * vertical, and running the analysis anyway would spend a pass on a
+       * number the filter graph cannot use — and then report "Smart Reframe"
+       * over a crop that was centred. The framing plan already knows which
+       * axis is being trimmed, so it is what decides.
+       */
+      const framingPlan = recipes.resolveFramingPlan(recipe, geometry);
       if (recipe.framing.enabled && recipe.framing.tracking === 'auto' &&
-          recipe.framing.mode === 'fill' && geometry.canvasWidth) {
+          recipe.framing.mode === 'fill' && geometry.canvasWidth &&
+          framingPlan.cropAxis !== 'x') {
+        job.warnings = addWarning(job.warnings,
+          framingPlan.cropAxis === 'y'
+            ? 'This output is wider than the source, so the picture is cropped top and bottom. ' +
+              'Subject tracking follows a horizontal position and cannot steer a vertical crop, ' +
+              'so the crop is centred.'
+            : 'The source is already this shape, so there is nothing for subject tracking to do.');
+      }
+      if (recipe.framing.enabled && recipe.framing.tracking === 'auto' &&
+          recipe.framing.mode === 'fill' && geometry.canvasWidth &&
+          framingPlan.cropAxis === 'x') {
         const stage = job.stages.find((s) => s.id === 'REFRAME');
         if (stage) { stage.status = 'running'; stage.startedAt = Date.now(); }
         job.stage = 'REFRAME';
@@ -648,7 +668,11 @@ class JobManager extends EventEmitter {
             durationSeconds: plan.totalDuration,
             cuts: cuts.cuts || [],
             profile: recipe.profile || 'auto',
-            targetAspect: geometry.canvasWidth / geometry.canvasHeight,
+            // The shape the crop rectangle is actually cut to, not the canvas
+            // ratio. With an anamorphic allowance in play the two differ, and
+            // handing the tracker the canvas ratio would have it compose the
+            // subject for a window narrower than the one that gets cropped.
+            targetAspect: framingPlan.cropRatio || (geometry.canvasWidth / geometry.canvasHeight),
             sourceAspect: (geometry.sourceWidth || 16) / (geometry.sourceHeight || 9),
             control,
             // Null when the models are absent or the runtime will not load,

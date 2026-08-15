@@ -114,6 +114,12 @@
     thumbCache: null,
     autoResult: null,
     recipeState: 'custom',  // 'auto' | 'modified' | 'custom'
+    /**
+     * The anamorphic allowance a crop may spend, carried from whatever last
+     * wrote the recipe. Zero means a purely geometric crop, which is what a
+     * hand-built recipe gets.
+     */
+    framingStretch: 0,
     resumeKey: null,
     lastSavedPosition: 0,
     idleTimer: null,
@@ -2193,6 +2199,7 @@
     state.autoResult = null;
     state.autoStale = false;
     state.recipeState = 'custom';
+    state.framingStretch = 0;
     // A new source means the previous account is about a different video.
     el.autoResult.hidden = true;
     el.autoUnmet.hidden = true;
@@ -3620,6 +3627,12 @@
     // Remember the mastering choice: the panel has a loudness switch, not a
     // full mastering picker, so Auto's choice would otherwise be lost.
     state.audioMaster = r.audio.master || 'preserve';
+    // Same reason, for the same kind of setting: the Framing control picks a
+    // *method*, and the anamorphic allowance a crop is permitted to spend is a
+    // number underneath it. Without this, `startCreate()` rebuilds the recipe
+    // from the controls and Auto's choice is silently dropped on the way to
+    // the render — the panel would say one thing and ffmpeg would do another.
+    state.framingStretch = Number(r.framing && r.framing.stretchTolerance) || 0;
     if (!keepLocks) syncPlatformUi();
     syncGeometryUi();
     syncAiUi();
@@ -4051,6 +4064,10 @@
     if (aspect) {
       overrides.framing = {
         ...framingOverride(el.createFraming.value),
+        // Carried, not re-derived. A hand-built recipe leaves this at zero and
+        // gets the pure geometric crop the label promises; Auto sets it and it
+        // survives the round-trip through the panel.
+        stretchTolerance: state.framingStretch || 0,
         canvas: aspect.id,
         aspectW: aspect.id === 'custom' ? aspect.w : null,
         aspectH: aspect.id === 'custom' ? aspect.h : null,

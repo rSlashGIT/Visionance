@@ -52,6 +52,18 @@ const AI_QUALITIES = ['fast', 'balanced', 'quality', 'maximum'];
 const AI_MODELS = ['auto', 'general', 'animation'];
 const FRAMING_MODES = ['fit', 'fill', 'stretch'];
 const FRAMING_TRACKING = ['none', 'center', 'auto'];
+/**
+ * How far a `fill` may stretch the picture anamorphically to buy back crop.
+ *
+ * Capped hard and low. Closing a 16:9 -> 21:9 gap by stretch alone needs 33%,
+ * at which point every face in the frame is visibly wide; splitting it evenly
+ * still needs 15%. Broadcast practice puts the threshold where a viewer starts
+ * to notice at around 5%, so nothing here is allowed past 8% and Auto asks for
+ * far less. What the allowance is genuinely good for is a small gap - a 2.30:1
+ * source into a 2.37:1 canvas disappears entirely into 3% and loses no picture
+ * at all.
+ */
+const MAX_STRETCH_TOLERANCE = 0.08;
 const BACKGROUNDS = ['black', 'blur'];
 const TONE_MAPS = ['none', 'hable', 'mobius', 'reinhard'];
 const AUDIO_MODES = ['copy', 'encode', 'none'];
@@ -102,6 +114,35 @@ const ASPECTS = {
   '2.39:1': { id: '2.39:1', label: '2.39:1 — cinemascope', suggested: { width: 2560, height: 1072 } },
   custom: { id: 'custom', label: 'Custom ratio', suggested: null }
 };
+
+/**
+ * Ratios worth naming, for saying what shape something is in a sentence.
+ *
+ * A number is not a shape to a reader: "2.37" means nothing, "21:9" means the
+ * thing they picked from the control. The list is deliberately wider than
+ * `CANVASES` because it also has to name shapes a *source* arrives in.
+ */
+const NAMED_RATIOS = [
+  [16 / 9, '16:9'], [9 / 16, '9:16'], [4 / 5, '4:5'], [1, '1:1'],
+  [64 / 27, '21:9'], [2.39, '2.39:1'], [4 / 3, '4:3'], [3 / 2, '3:2'],
+  [3 / 4, '3:4'], [2 / 3, '2:3'], [2.35, '2.35:1']
+];
+/**
+ * Even-pixel rounding moves a ratio slightly: 2560x1080 is 2.3704 against a
+ * nominal 2.3704, but 3840x1608 is 2.3881 against 2.39. This accepts that and
+ * still keeps 16:9 (1.778) from being called 21:9 (2.370).
+ */
+const RATIO_NAME_TOLERANCE = 0.02;
+
+/** Name a ratio the way a person would say it. */
+function describeAspectRatio(ratio) {
+  const r = Number(ratio);
+  if (!Number.isFinite(r) || r <= 0) return null;
+  for (const [value, label] of NAMED_RATIOS) {
+    if (Math.abs(r - value) < RATIO_NAME_TOLERANCE) return label;
+  }
+  return `${r.toFixed(2)}:1`;
+}
 
 /** The ratio a canvas id represents, or null for source/unset. */
 function aspectRatioOf(canvasId, framing = null) {
@@ -341,6 +382,12 @@ function baseRecipe() {
       mode: 'fit',
       background: 'blur',
       tracking: 'none',
+      /**
+       * Anamorphic allowance for `fill`, 0 = pure crop. Only `fill` reads it;
+       * the default keeps every manually-chosen crop exactly as geometric as
+       * it has always been, and Auto opts in explicitly.
+       */
+      stretchTolerance: 0,
       crop: null
     },
 
@@ -517,8 +564,13 @@ function sanitize(input) {
     // inside ffmpeg instead of here.
     aspectW: optInt(f.aspectW, 1, 1000),
     aspectH: optInt(f.aspectH, 1, 1000),
+    stretchTolerance: round(clamp(f.stretchTolerance, 0, MAX_STRETCH_TOLERANCE, 0), 4),
     crop: sanitizeCrop(f.crop)
   };
+  // Only a crop can trade shape for stretch. Leaving the number set on a mode
+  // that ignores it would let the UI and the verifier read an allowance that
+  // nothing will ever spend.
+  if (framing.mode !== 'fill') framing.stretchTolerance = 0;
   // 'auto' is Smart Reframe and is implemented; whether a usable trajectory can
   // be produced is a run-time question, answered by the REFRAME stage, which
   // falls back to centre framing and says so.
@@ -1029,6 +1081,14 @@ function resolveOutputGeometry(recipe, analysis) {
     sourceWidth: srcW || null,
     sourceHeight: srcH || null,
     sourceFps: srcFps || null,
+    /**
+     * True when the framing stage owns the resample onto the canvas, which is
+     * what makes `scaleWidth`/`scaleHeight` equal to the source above. The
+     * neural post-chain reads it for the same reason: a second scale in front
+     * of the crop is either a no-op or a way to throw the network's output
+     * away and then enlarge it again.
+     */
+    framesToCanvas,
     // What the reconstruction stage scales to *before* framing. Equal to the
     // source when framing performs the resample itself.
     scaleWidth: preScaleW ? even(preScaleW) : null,
@@ -1043,6 +1103,165 @@ function resolveOutputGeometry(recipe, analysis) {
     height: finalH ? even(finalH) : null,
     fps: fps ? round(fps, 3) : null,
     fpsChanged: !!(fps && srcFps && Math.abs(fps - srcFps) > 0.01)
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Intent -> framing contract
+ * ------------------------------------------------------------------ */
+
+/**
+ * What actually happens to the picture inside the canvas.
+ *
+ * `resolveOutputGeometry()` answers "how big is the file". This answers the
+ * question that was never asked anywhere: *does the picture fill it*. A real
+ * render asked for 21:9 at 2K and produced a 2560x1080 file whose visible
+ * content was a 1920x1080 16:9 picture with 320 px of black either side. Every
+ * geometry check passed, because every one of them was about the container.
+ *
+ * So the filter builder, Auto's explanations and the output verifier all read
+ * this one object. It states which axis is trimmed, how much of the source
+ * survives, how much anamorphic stretch is being spent, and - the field the
+ * whole failure turned on - whether the result is supposed to reach every edge
+ * of the frame.
+ *
+ * @param {object} recipe    sanitised recipe
+ * @param {object} geometry  result of resolveOutputGeometry()
+ */
+function resolveFramingPlan(recipe, geometry) {
+  const f = (recipe && recipe.framing) || {};
+  const g = geometry || {};
+  const canvasWidth = g.canvasWidth || null;
+  const canvasHeight = g.canvasHeight || null;
+
+  const base = {
+    active: false,
+    mode: null,
+    background: null,
+    tracking: 'none',
+    canvasWidth,
+    canvasHeight,
+    targetRatio: null,
+    sourceRatio: null,
+    cropRatio: null,
+    /** The contract promises the picture reaches all four edges. */
+    fills: true,
+    /** Which axis the crop trims, or null when nothing is trimmed. */
+    cropAxis: null,
+    /** Which axis carries bars, for the modes that legitimately have them. */
+    barAxis: null,
+    keepWidth: 1,
+    keepHeight: 1,
+    /** Anamorphic factor actually spent, >= 1. */
+    stretch: 1,
+    stretchAxis: null,
+    stretchTolerance: 0,
+    /** The picture rectangle expected inside the canvas. */
+    activeWidth: g.width || null,
+    activeHeight: g.height || null
+  };
+
+  // No canvas means no reshaping: the output is the source's own shape, so it
+  // fills itself by definition.
+  if (!f.enabled || !canvasWidth || !canvasHeight) return base;
+
+  const mode = pick(f.mode, FRAMING_MODES, 'fit');
+  const background = pick(f.background, BACKGROUNDS, 'black');
+  const tracking = pick(f.tracking, FRAMING_TRACKING, 'none');
+  const targetRatio = canvasWidth / canvasHeight;
+
+  const srcW = g.sourceWidth || g.scaleWidth || null;
+  const srcH = g.sourceHeight || g.scaleHeight || null;
+  if (!srcW || !srcH) {
+    // The source shape is unknown, so nothing about crop or bars can be
+    // claimed. What the *mode* promises is still knowable and is what the
+    // verifier is entitled to assert.
+    return { ...base, active: true, mode, background, tracking, targetRatio, fills: mode !== 'fit' };
+  }
+
+  // The picture that reaches the canvas step. A manual crop runs in front of it
+  // and changes the shape it sees; the neural path hands it the network's
+  // output, which is the source scaled uniformly and so has the same ratio.
+  const manual = f.crop;
+  const sourceRatio = manual
+    ? (srcW * manual.width) / (srcH * manual.height)
+    : srcW / srcH;
+
+  /** Vertical scale over horizontal scale, given the shape being scaled. */
+  const describeStretch = (cropRatio) => {
+    const d = cropRatio / targetRatio;
+    if (Math.abs(d - 1) < 1e-6) return { stretch: 1, stretchAxis: null };
+    return d < 1
+      ? { stretch: round(1 / d, 4), stretchAxis: 'x' }
+      : { stretch: round(d, 4), stretchAxis: 'y' };
+  };
+
+  const common = {
+    active: true, mode, background, tracking, canvasWidth, canvasHeight,
+    targetRatio: round(targetRatio, 5),
+    sourceRatio: round(sourceRatio, 5)
+  };
+
+  if (mode === 'stretch') {
+    return {
+      ...base, ...common,
+      cropRatio: round(sourceRatio, 5),
+      fills: true, cropAxis: null, barAxis: null,
+      keepWidth: 1, keepHeight: 1,
+      ...describeStretch(sourceRatio),
+      stretchTolerance: 0,
+      activeWidth: canvasWidth, activeHeight: canvasHeight
+    };
+  }
+
+  if (mode === 'fit') {
+    // Rounding a ratio to even pixels moves it a little; a shape this close
+    // produces no bar worth the name.
+    const alreadyFits = Math.abs(sourceRatio - targetRatio) <= 0.005;
+    let activeWidth = canvasWidth;
+    let activeHeight = canvasHeight;
+    if (!alreadyFits) {
+      if (sourceRatio > targetRatio) activeHeight = evenDim(canvasWidth / sourceRatio);
+      else activeWidth = evenDim(canvasHeight * sourceRatio);
+    }
+    return {
+      ...base, ...common,
+      cropRatio: round(sourceRatio, 5),
+      fills: alreadyFits,
+      cropAxis: null,
+      // Wider than the canvas means bars top and bottom; narrower means bars
+      // left and right, which is what a 16:9 source in a 21:9 canvas gets.
+      barAxis: alreadyFits ? null : (sourceRatio > targetRatio ? 'y' : 'x'),
+      keepWidth: 1, keepHeight: 1,
+      stretch: 1, stretchAxis: null, stretchTolerance: 0,
+      activeWidth, activeHeight
+    };
+  }
+
+  /* fill: crop to the target shape, spending up to `stretchTolerance` of the
+   * gap on an anamorphic scale so the crop does not have to take all of it. */
+  const tolerance = round(clamp(f.stretchTolerance, 0, MAX_STRETCH_TOLERANCE, 0), 4);
+  const lo = targetRatio / (1 + tolerance);
+  const hi = targetRatio * (1 + tolerance);
+  // The shape the crop rectangle is cut to. Inside the tolerance band it is the
+  // source's own shape, so nothing is cropped at all and the final scale closes
+  // the gap; outside it the band edge is used and the crop does the rest.
+  const cropRatio = Math.min(hi, Math.max(lo, sourceRatio));
+  const keepWidth = Math.min(1, cropRatio / sourceRatio);
+  const keepHeight = Math.min(1, sourceRatio / cropRatio);
+
+  return {
+    ...base, ...common,
+    cropRatio: round(cropRatio, 5),
+    fills: true,
+    cropAxis: keepWidth < 0.999 ? 'x' : (keepHeight < 0.999 ? 'y' : null),
+    barAxis: null,
+    keepWidth: round(keepWidth, 5),
+    keepHeight: round(keepHeight, 5),
+    ...describeStretch(cropRatio),
+    stretchTolerance: tolerance,
+    activeWidth: canvasWidth,
+    activeHeight: canvasHeight
   };
 }
 
@@ -1084,6 +1303,8 @@ module.exports = {
   CANVASES,
   ASPECTS,
   aspectRatioOf,
+  describeAspectRatio,
+  RATIO_NAME_TOLERANCE,
   suggestedResolution,
   RECONSTRUCTION_MODES,
   INTERPOLATION_MODES,
@@ -1091,6 +1312,9 @@ module.exports = {
   AI_QUALITIES,
   AI_MODELS,
   AUDIO_MASTERS,
+  FRAMING_MODES,
+  FRAMING_TRACKING,
+  MAX_STRETCH_TOLERANCE,
   baseRecipe,
   defaultRecipe,
   applyPlatform,
@@ -1102,5 +1326,6 @@ module.exports = {
   deserialize,
   analysisRefFrom,
   resolveOutputGeometry,
+  resolveFramingPlan,
   deepMerge
 };

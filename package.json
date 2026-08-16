@@ -127,6 +127,7 @@
   },
   "allowScripts": {
     "ffmpeg-static@5.2.0": true,
-    "electron-winstaller": false
+    "electron-winstaller": false,
+    "onnxruntime-node@1.27.0": true
   }
 }

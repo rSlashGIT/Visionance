@@ -26,6 +26,12 @@ const DEFAULTS = {
     maxStreamHeight: 0,
     watchQuality: 'auto',
     /**
+     * Which of Watch's four real enhancement stages the realtime budget
+     * favours: auto | clean | detail | sharp | finish. Biases a Look; it does
+     * not select models and has nothing to do with Create's offline engines.
+     */
+    watchIntent: 'auto',
+    /**
      * How Visionance authenticates to a site, when - and only when - the site
      * says authentication is required. `none` means public access only, and it
      * is the default: reading a browser's cookie jar is reading a credential

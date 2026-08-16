@@ -858,6 +858,87 @@ test('pixels: the neural encode honours a blurred fit instead of substituting bl
   }
 });
 
+/* ------------------------------------------------------------------ *
+ * A genuinely low-resolution source reaching the 2K ultrawide raster.
+ *
+ * The accepted real render started from a 2560-wide master, so it proved the
+ * framing but never proved *spatial scaling*: a container-only "upscale" would
+ * have looked identical there. This drives a 1280x720 source all the way to
+ * 2560x1080 through the production graph and reads the result back off disk.
+ * ------------------------------------------------------------------ */
+
+test('create: 720p to 2K ultrawide really scales, fills and keeps its audio', async (t) => {
+  if (!mediaReady) return t.skip('ffmpeg/ffprobe unavailable');
+
+  const src = path.join(TMP, 'sd-source.mp4');
+  const out = path.join(TMP, 'sd-to-2k.mp4');
+  // 1280x720 with a tone, so the audio contract has something to preserve.
+  let r = spawnSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y',
+    '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=24:duration=3',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', src],
+  { encoding: 'utf8' });
+  assert.equal(r.status, 0, `fixture did not encode: ${r.stderr}`);
+
+  const analysis = {
+    video: { width: 1280, height: 720, nominalFps: 24, codec: 'h264', bitrate: 1.2e6 },
+    audio: { codec: 'aac' }, color: { isHDR: false },
+    container: { duration: 3, bitrate: 1.2e6 },
+    derived: {
+      displayWidth: 1280, displayHeight: 720, durationSeconds: 3, nominalFps: 24,
+      orientation: 'landscape', isVertical: false, resolutionClass: '720p',
+      hasAudio: true, isHDR: false, isInterlaced: false
+    },
+    source: { type: 'local', name: 'sd' }, warnings: []
+  };
+
+  // The production Auto path, locked to 21:9 at the 2K class and the source
+  // rate (no interpolation, so this stays a fast test).
+  const res = auto.buildAutoConfigure({
+    analysis, platform: 'custom', profile: 'auto', intensity: 'balanced',
+    outputPath: out, preferences: {},
+    locks: { aspect: '21:9', resolution: 'custom', width: 2560, height: 1080, fps: null },
+    machine: { gpuTier: 'discrete' },
+    engines: { realesrgan: false, rife: false, reframe: true }
+  });
+  const { geometry, plan } = resolved(res.recipe, analysis);
+  assert.equal(`${geometry.width}x${geometry.height}`, '2560x1080');
+  assert.equal(plan.fills, true, 'Auto must resolve a filled contract here');
+
+  const { graph } = buildVideoGraph(res.recipe, geometry, analysis, { availableFilters: FILTERS });
+  assert.doesNotMatch(graph, /pad=/, graph);
+
+  r = spawnSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-i', src,
+    '-filter_complex', graph, '-map', '[vout]', '-map', '0:a:0',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', out], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `render failed: ${r.stderr}`);
+
+  const probe = (args) => spawnSync(FFPROBE,
+    ['-v', 'error', ...args, '-of', 'csv=p=0', out], { encoding: 'utf8' }).stdout.trim();
+
+  const dims = probe(['-select_streams', 'v:0', '-show_entries', 'stream=width,height,r_frame_rate']);
+  const [w, h, rate] = dims.split(',');
+  assert.equal(`${w}x${h}`, '2560x1080', `container is ${dims}`);
+  assert.equal(rate, '24/1', `frame rate contract broken: ${rate}`);
+
+  const acodec = probe(['-select_streams', 'a:0', '-show_entries', 'stream=codec_name']);
+  assert.equal(acodec, 'aac', `audio was not preserved: "${acodec}"`);
+
+  // The picture must fill the ultrawide raster, not sit inside it.
+  const active = await measureActivePicture({ ffmpeg: FFMPEG, filePath: out, durationSeconds: 3 });
+  assert.ok(active, 'the output must be measurable');
+  assert.equal(active.width, 2560, `active picture is ${active.width}x${active.height}`);
+  assert.equal(active.height, 1080);
+
+  // And it must be a real resample: the crop taken from a 1280-wide source is
+  // narrower than the 2560-wide raster it lands on, so a container-only
+  // "upscale" is arithmetically impossible to pass here.
+  const cropW = Math.min(1280, 720 * plan.cropRatio);
+  assert.ok(cropW <= 1280);
+  assert.ok(2560 / cropW > 1.9,
+    `2560 from a ${Math.round(cropW)}px crop is only ${(2560 / cropW).toFixed(2)}x`);
+});
+
 test('pixels: cleanup', () => {
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { /* best effort */ }
   assert.ok(true);

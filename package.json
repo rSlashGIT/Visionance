@@ -41,6 +41,8 @@
     "verify:temporal": "node --test tools/verify-temporal.js",
     "verify:framing": "node --test tools/verify-framing.js",
     "verify:cadence": "node --test tools/verify-cadence.js",
+    "verify:hardware": "node --test tools/verify-hardware.js",
+    "machine": "electron tools/machine-report.js",
     "verify:playback": "electron tools/verify-playback.js",
     "measure:visibility": "electron tools/measure-video-visibility.js",
     "measure:cadence": "electron tools/measure-present-cadence.js",

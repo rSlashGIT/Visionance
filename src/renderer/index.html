@@ -571,6 +571,23 @@
               <p class="field-help">Auto keeps motion smooth and raises quality only
                 when there is headroom. Never affects Create's offline AI quality.</p>
 
+              <!-- What to spend the realtime budget on. These map to the four
+                   stages that genuinely exist in the shader chain — restore,
+                   reconstruct, sharpen, finish — and to nothing else. -->
+              <div class="field-row">
+                <label for="watchIntent">Enhance for</label>
+                <select id="watchIntent" class="select">
+                  <option value="auto" selected>Auto</option>
+                  <option value="clean">Clean — remove compression damage</option>
+                  <option value="detail">Detail — rebuild fine structure</option>
+                  <option value="sharp">Sharp — crisper edges</option>
+                  <option value="finish">Finish — colour and tone</option>
+                </select>
+              </div>
+              <p class="field-help" id="watchIntentHelp">Auto reads the source and this
+                machine. The others bias the same four stages; Fine tune still overrides
+                everything.</p>
+
               <div class="field-row switch-row">
                 <label for="adaptiveToggle">Adaptive quality</label>
                 <input type="checkbox" id="adaptiveToggle" class="switch" checked>
@@ -1336,6 +1353,7 @@
 </div>
 
 <script src="js/playback-stats.js"></script>
+<script src="js/enhance-intent.js"></script>
 <script src="js/shaders.js"></script>
 <script src="js/engine.js"></script>
 <script src="js/presets.js"></script>

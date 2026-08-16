@@ -372,6 +372,106 @@ test('scheduler: with no rvfc the fallback says so rather than pretending', () =
  * Metrics are not conflated
  * ================================================================== */
 
+/* ================================================================== *
+ * Coalesced callbacks: the 23 fps source that arrived as 14.5 fps
+ * ================================================================== */
+
+/**
+ * Drive one second of playback with a media rate, a display rate, and a
+ * callback-coalescing factor.
+ *
+ * `requestVideoFrameCallback` is not guaranteed to fire once per presented
+ * frame - the browser coalesces it exactly when the page is busy. In the real
+ * app that produced media at 22.7 fps and an enhanced picture at 14.5 fps with
+ * the miss rate reading 0%, because the engine drew one frame per *callback*
+ * and counted source frames the same way.
+ */
+function runPlayback({ mediaFps, displayHz = 60, coalesce = 1, seconds = 1 }) {
+  const engine = makeEngine();
+  engine.draw = () => { engine._framesSinceStats++; };
+  engine.running = true;
+  sandbox.__rafQueue.length = 0;
+  sandbox.__now = 0;
+
+  const video = engine.video;
+  video.paused = false;
+  video.currentTime = 0;
+  let presentedFrames = 0;
+  let rvfcPending = null;
+  video.requestVideoFrameCallback = (fn) => { rvfcPending = fn; return 1; };
+
+  engine._restartFrameSource();
+
+  const mediaPeriod = 1000 / mediaFps;
+  const refresh = 1000 / displayHz;
+  const totalMs = seconds * 1000;
+  let nextMedia = mediaPeriod;
+  let nextRefresh = refresh;
+  let callbackCounter = 0;
+
+  while (sandbox.__now < totalMs) {
+    if (nextMedia <= nextRefresh) {
+      sandbox.__now = nextMedia;
+      nextMedia += mediaPeriod;
+      presentedFrames++;
+      video.currentTime = presentedFrames / mediaFps;
+      // Only every `coalesce`-th media frame actually delivers a callback.
+      callbackCounter++;
+      if (rvfcPending && callbackCounter % coalesce === 0) {
+        const fn = rvfcPending;
+        rvfcPending = null;
+        fn(sandbox.__now, { presentedFrames, mediaTime: video.currentTime, expectedDisplayTime: 0 });
+      }
+    } else {
+      sandbox.__now = nextRefresh;
+      nextRefresh += refresh;
+      const fn = sandbox.__rafQueue.shift();
+      if (fn) fn(sandbox.__now);
+    }
+  }
+  return { drawn: engine._framesSinceStats, offered: engine._sourceFrames, engine };
+}
+
+test('cadence: a 23.976 fps source is enhanced at 23.976 fps', () => {
+  const { drawn } = runPlayback({ mediaFps: 23.976 });
+  assert.ok(drawn >= 22, `only ${drawn} enhanced frames for a 23.976 fps second`);
+});
+
+test('cadence: 25 and 30 fps sources are followed too', () => {
+  for (const fps of [25, 30]) {
+    const { drawn } = runPlayback({ mediaFps: fps });
+    assert.ok(drawn >= fps - 2, `${fps} fps source produced only ${drawn} enhanced frames`);
+  }
+});
+
+test('cadence: 50 and 60 fps sources are not capped at 24 or 30', () => {
+  for (const fps of [50, 60]) {
+    const { drawn } = runPlayback({ mediaFps: fps, displayHz: 60 });
+    assert.ok(drawn >= 45, `${fps} fps source was held to ${drawn} enhanced frames`);
+  }
+});
+
+test('cadence: coalesced video callbacks no longer halve the enhanced rate', () => {
+  /*
+   * The real failure. With the browser delivering a callback for only every
+   * other presented frame, an engine that draws once per callback advances the
+   * picture at half the media rate - measured in the app as 22.7 fps media
+   * against 14.5 fps enhanced. The media element's own clock is the second
+   * opinion that closes the gap.
+   */
+  const { drawn, offered } = runPlayback({ mediaFps: 24, coalesce: 2 });
+  assert.ok(offered >= 22, `media frames must still be counted honestly, got ${offered}`);
+  assert.ok(drawn >= 20,
+    `enhanced output collapsed to ${drawn} fps while the media ran at 24`);
+});
+
+test('cadence: media frames are counted from the compositor, not from callbacks', () => {
+  // The denominator that made a real shortfall read as "0% missed".
+  const { offered } = runPlayback({ mediaFps: 24, coalesce: 3 });
+  assert.ok(offered >= 22,
+    `only ${offered} source frames counted for a 24 fps second with coalesced callbacks`);
+});
+
 test('metrics: decoder drops are marked untrustworthy while the element is parked', () => {
   const engine = makeEngine();
   // Watch's enhanced-mode parking: 1x1, off-screen.

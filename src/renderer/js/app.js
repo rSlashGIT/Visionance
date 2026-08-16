@@ -68,6 +68,8 @@
     presentation: null,   // 'native' | 'enhanced'
     playback: null,       // PlaybackStats
     watchQuality: 'auto',
+    /** Which of the four real enhancement stages the budget favours. */
+    watchIntent: 'auto',
     splitX: 0.5,
     splitDragging: false,
     scrubbing: false,
@@ -81,7 +83,7 @@
      * `path` records which rung actually restored the sound — the diagnostics
      * panel reports it, so "it works now" is never a guess.
      */
-    audioRecovery: { attempts: 0, running: false, path: null },
+    audioRecovery: { attempts: 0, running: false, path: null, reducedTo: 0, heightBefore: 0 },
     jobs: new Map(),
     analysis: null,        // full source analysis for the loaded media
 
@@ -154,7 +156,8 @@
     'scrubKnob', 'scrubTooltip', 'playBtn', 'back10Btn', 'fwd10Btn', 'muteBtn',
     'volume', 'timeLabel', 'enhanceToggle', 'compareBtn', 'resBadge',
     'speedSelect', 'snapshotBtn', 'pipBtn', 'fullscreenBtn', 'panel',
-    'presetGrid', 'watchQuality', 'scaleSelect', 'adaptiveToggle', 'presetName', 'savePresetBtn',
+    'presetGrid', 'watchQuality', 'watchIntent', 'watchIntentHelp',
+    'scaleSelect', 'adaptiveToggle', 'presetName', 'savePresetBtn',
     'controlGroups', 'resetParamsBtn',
     'createSourceTitle', 'analyseBtn', 'analysisGrid', 'analysisNote',
     'autoBlock', 'autoState', 'autoProfile', 'autoIntensity', 'autoBuildBtn', 'autoExplain',
@@ -303,7 +306,7 @@
       state.audioLegFailed = false;
       // A new source gets the full ladder again: the previous source's
       // exhausted attempts say nothing about this one.
-      state.audioRecovery = { attempts: 0, running: false, path: null };
+      state.audioRecovery = { attempts: 0, running: false, path: null, reducedTo: 0, heightBefore: 0 };
       v.pause();
       a.pause();
       a.removeAttribute('src');
@@ -489,6 +492,9 @@
       if (!descriptor || descriptor.kind !== 'stream') return this.giveUpOnAudio('local');
 
       state.audioRecovery.running = true;
+      // What we are about to risk, so the fallback can say what it cost.
+      state.audioRecovery.heightBefore =
+        (descriptor.video && descriptor.video.height) || el.video.videoHeight || 0;
       try {
         while (state.audioRecovery.attempts < 2) {
           const attempt = ++state.audioRecovery.attempts;
@@ -497,10 +503,12 @@
             ? await api.media.refreshStream(state.source.token)
             // A combined rendition: one request, so there is no audio leg left
             // to refuse. Costs resolution, which is the right trade for sound.
-            : await api.media.resolveUrl(descriptor.webpageUrl || descriptor.source, {
-              watchQuality: state.watchQuality,
-              preferMuxed: true
-            });
+            // A combined rendition. This call used to omit the viewport, so the
+            // policy ran blind and assumed 1080p; it makes no difference to the
+            // muxed choice itself but it is the same question and deserves the
+            // same inputs.
+            : await api.media.resolveUrl(descriptor.webpageUrl || descriptor.source,
+              { ...watchResolveContext(), preferMuxed: true });
           if (stale()) {
             if (attempt === 2 && res.ok && res.streamToken) {
               api.media.releaseStream(res.streamToken).catch(() => {});
@@ -523,10 +531,25 @@
           if (stale()) return;
           if (recovered) {
             state.audioRecovery.path = attempt === 1 ? 'refreshed-session' : 'muxed-fallback';
+            /*
+             * Say what was actually given up.
+             *
+             * On YouTube the only combined rendition is 360p, so this trade is
+             * 1080p -> 360p, not "slightly lower". A real session sat at 640x360
+             * with the enhancement engine dutifully upscaling it, and nothing on
+             * screen explained why. The height is read back off the stream that
+             * was actually adopted rather than assumed.
+             */
+            const before = state.audioRecovery.heightBefore || 0;
+            const after = (res.video && res.video.height) || 0;
+            state.audioRecovery.reducedTo = attempt === 2 ? after : 0;
             toast(attempt === 1
               ? 'The audio track was refused and has been restored from a fresh stream.'
-              : 'The separate audio track kept being refused, so a combined stream is playing ' +
-                'instead. The picture may be slightly lower resolution.', 'ok', 7000);
+              : (before && after && after < before
+                ? `The separate audio track kept being refused, so a combined ${after}p stream is ` +
+                  `playing instead of ${before}p. Reload the video to try HD again.`
+                : 'The separate audio track kept being refused, so a combined stream is playing ' +
+                  'instead. The picture is lower resolution.'), 'ok', 9000);
             refreshWatchSurfaces();
             return;
           }
@@ -639,6 +662,25 @@
   /* ------------------------------------------------------------------ *
    * Loading sources
    * ------------------------------------------------------------------ */
+
+  /**
+   * What the stream policy needs to know about this window.
+   *
+   * One place, because every resolve has to answer the same question and a
+   * caller that forgets the viewport gets a blind guess instead of a decision.
+   */
+  function watchResolveContext() {
+    const rect = el.stageInner.getBoundingClientRect();
+    return {
+      viewportWidth: Math.round(rect.width),
+      viewportHeight: Math.round(rect.height),
+      devicePixelRatio: window.devicePixelRatio || 1,
+      screenWidth: window.screen ? window.screen.width : 0,
+      screenHeight: window.screen ? window.screen.height : 0,
+      enhancement: !!(state.params && state.params.enabled),
+      watchQuality: state.watchQuality
+    };
+  }
 
   function showLoading(text) {
     el.loadingText.textContent = text;
@@ -773,16 +815,7 @@
         showLoading('Resolving stream…');
         // Tell the resolver what this window can actually display, so it does
         // not pick a 1440p rendition for a 900px viewport.
-        const rect = el.stageInner.getBoundingClientRect();
-        const res = await api.media.resolveUrl(request.url, {
-          viewportWidth: Math.round(rect.width),
-          viewportHeight: Math.round(rect.height),
-          devicePixelRatio: window.devicePixelRatio || 1,
-          screenWidth: window.screen ? window.screen.width : 0,
-          screenHeight: window.screen ? window.screen.height : 0,
-          enhancement: !!(state.params && state.params.enabled),
-          watchQuality: state.watchQuality
-        });
+        const res = await api.media.resolveUrl(request.url, watchResolveContext());
 
         // The user moved on while this was resolving. Hand the session back
         // rather than letting it linger, and write nothing.
@@ -1043,9 +1076,21 @@
   }
 
   function applyParams(params, presetId) {
-    state.params = { ...params };
+    /*
+     * Look, then intent, then Fine tune.
+     *
+     * The Look decides the character; the intent decides which of the four real
+     * stages gets the realtime budget; Fine tune writes parameters directly and
+     * therefore wins over both. `baseParams` deliberately records the
+     * intent-biased values, so a per-slider reset returns to what the user
+     * actually asked for rather than to a Look they never selected on its own.
+     */
+    const biased = window.VSIntent
+      ? window.VSIntent.applyIntent(params, state.watchIntent)
+      : params;
+    state.params = { ...biased };
     // The baseline every "modified" marker and per-slider reset measures from.
-    state.baseParams = { ...params };
+    state.baseParams = { ...biased };
     if (presetId) state.presetId = presetId;
     if (state.engine) state.engine.setParams(state.params);
     syncControlValues();
@@ -1726,7 +1771,13 @@
           ['Frame cost', s.gpuTimingAvailable
             ? `${s.gpuMs} ms GPU / ${s.frameBudgetMs} ms budget`
             : `${s.cpuMs} ms CPU / ${s.frameBudgetMs} ms budget (no GPU timer)`],
-          ['Missed frames', `${s.missRate}%`],
+          // A single "missed" number cannot explain a 23 fps source arriving as
+          // a 14.5 fps picture, so the shortfall is broken down by cause.
+          ['Frames', `${s.framesPresented} shown / ${s.framesOffered} offered`],
+          ['Missed frames', s.missRate
+            ? `${s.missRate}% · ${s.computeMisses} compute, ${s.presentationMisses} presentation`
+            : '0%'],
+          ['Superseded', String(s.superseded)],
           ['Quality scale', `${Math.round(s.droppedScale * 100)}% · ${s.policy}`],
           ['Scheduler', s.scheduler]
         ]]);
@@ -5069,6 +5120,27 @@
     api.settings.patch({ watchQuality: value });
   }
 
+  /**
+   * Which of the four real stages the realtime budget favours.
+   *
+   * Re-applies the current Look through the new intent rather than patching the
+   * live parameters, so switching intents twice cannot compound - the bias is
+   * always computed from the Look, never from an already-biased value.
+   */
+  function setWatchIntent(value) {
+    const allowed = ['auto', 'clean', 'detail', 'sharp', 'finish'];
+    state.watchIntent = allowed.includes(value) ? value : 'auto';
+    el.watchIntent.value = state.watchIntent;
+    if (el.watchIntentHelp && window.VSIntent) {
+      el.watchIntentHelp.textContent = window.VSIntent.describeIntent(state.watchIntent) +
+        '. Fine tune still overrides everything.';
+    }
+    const look = findPreset(state.presetId);
+    applyParams(look ? { ...look.params } : { ...state.baseParams }, state.presetId);
+    api.settings.patch({ watchIntent: state.watchIntent });
+    refreshWatchSurfaces();
+  }
+
   /* ------------------------------------------------------------------ *
    * AUTO CONFIGURE (Watch)
    *
@@ -6123,6 +6195,7 @@
     // segmented view of this same value; with both panels merged into Watch a
     // duplicate would just be two controls to keep in step.
     el.watchQuality.addEventListener('change', () => setWatchQuality(el.watchQuality.value));
+    el.watchIntent.addEventListener('change', () => setWatchIntent(el.watchIntent.value));
     el.adjustToCreateBtn.addEventListener('click', sendToCreate);
 
     el.scaleSelect.addEventListener('change', () => {
@@ -6429,6 +6502,12 @@
     el.targetFpsSelect.value = String(state.settings.targetFps || 60);
     state.watchQuality = state.settings.watchQuality || 'auto';
     el.watchQuality.value = state.watchQuality;
+    state.watchIntent = state.settings.watchIntent || 'auto';
+    el.watchIntent.value = state.watchIntent;
+    if (el.watchIntentHelp && window.VSIntent) {
+      el.watchIntentHelp.textContent = window.VSIntent.describeIntent(state.watchIntent) +
+        '. Fine tune still overrides everything.';
+    }
     el.maxHeight.value = String(state.settings.maxStreamHeight ?? 0);
 
     const auth = state.settings.auth || { mode: 'none' };

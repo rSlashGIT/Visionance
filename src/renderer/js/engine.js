@@ -211,6 +211,18 @@
         skipped: 0,
         /** Share of source frames that never became an enhanced frame. */
         missRate: 0,
+        /** Media frames the compositor presented, per stats window. */
+        framesOffered: 0,
+        /** Enhanced frames we actually committed, per stats window. */
+        framesPresented: 0,
+        /** Replaced by a newer frame before ever being drawn. */
+        superseded: 0,
+        /** Missed because a draw was still running: genuine compute pressure. */
+        computeMisses: 0,
+        /** Missed for any other reason: scheduling, coalesced callbacks. */
+        presentationMisses: 0,
+        /** New frames found from the media clock when no callback arrived. */
+        lateDetected: 0,
         /**
          * Media time advanced per second of wall clock. 1.0 means playback is
          * keeping real time, which is the contract. Immune to how the media
@@ -240,6 +252,19 @@
       this._pendingFrame = false;
       /** Source frames signalled since the last stats tick. */
       this._sourceFrames = 0;
+      /** Compositor's own frame counter, for counting media frames honestly. */
+      this._lastPresentedFrames = null;
+      /** Media time of the last frame we actually drew. */
+      this._lastDrawnMediaTime = null;
+      /** `expectedDisplayTime` of the frame waiting to be shown. */
+      this._pendingDisplayTime = 0;
+      /** Frames replaced by a newer one before they were ever drawn. */
+      this._supersededSinceStats = 0;
+      /** New frames found from the media clock because no callback arrived. */
+      this._lateDetectedSinceStats = 0;
+      /** Rolling display refresh interval, learned from rAF timestamps. */
+      this._refreshMs = 0;
+      this._lastRafAt = 0;
       /** Media/wall-clock tracking, the cadence contract's own measurement. */
       this._clockMark = null;
 
@@ -356,6 +381,9 @@
       this._frameIntervals = [];
       this._measuredIntervalMs = 0;
       this._rateWindow = [];
+      this._lastPresentedFrames = null;
+      this._lastDrawnMediaTime = null;
+      this._pendingDisplayTime = 0;
     }
 
     setVideo(videoEl) {
@@ -500,8 +528,41 @@
         // rather than working through a backlog.
         this._rvfcHandle = this.video.requestVideoFrameCallback(mark);
         this._notePresentation(now, meta);
-        this._sourceFrames++;
+
+        /*
+         * Count media frames, not callbacks.
+         *
+         * `requestVideoFrameCallback` is not guaranteed to fire once per
+         * presented frame - the browser coalesces callbacks precisely when the
+         * page is busy, which is exactly when enhancement is running. Counting
+         * invocations therefore under-counts the media, and because the engine
+         * drew one frame per invocation the *draw* rate inherited that
+         * under-count: measured in the real app, media presented 22.7 fps while
+         * the enhanced canvas advanced at 14.5 fps and the miss rate read 0%,
+         * because we had faithfully drawn one frame for every callback we
+         * received. The denominator was wrong, so the shortfall was invisible.
+         *
+         * `presentedFrames` is the compositor's own running total and is
+         * exposed by the spec for this reason.
+         */
+        if (meta && Number.isFinite(meta.presentedFrames)) {
+          const prev = this._lastPresentedFrames;
+          if (prev !== null && meta.presentedFrames > prev) {
+            this._sourceFrames += Math.min(10, meta.presentedFrames - prev);
+          } else if (prev === null) {
+            this._sourceFrames++;
+          }
+          this._lastPresentedFrames = meta.presentedFrames;
+        } else {
+          this._sourceFrames++;
+        }
+
+        // A frame still waiting when the next one arrives was never shown.
+        if (this._pendingFrame) this._supersededSinceStats++;
         this._pendingFrame = true;
+        this._pendingDisplayTime = meta && Number.isFinite(meta.expectedDisplayTime)
+          ? meta.expectedDisplayTime
+          : 0;
       };
       this._rvfcHandle = this.video.requestVideoFrameCallback(mark);
 
@@ -514,7 +575,7 @@
        * media's own `play` event brings it back; a paused redraw goes through
        * `_scheduleIdleDraw()` instead, which fires once.
        */
-      const present = () => {
+      const present = (now) => {
         if (!this.running) return;
         if (this.video && this.video.paused) {
           this._rafHandle = null;
@@ -522,12 +583,72 @@
           return;
         }
         this._rafHandle = requestAnimationFrame(present);
-        if (!this._pendingFrame && !this._needsDraw) return;
+
+        /*
+         * Is there a new media frame to show?
+         *
+         * The video callback is the primary signal, but it is not a reliable
+         * *count* - see `mark()`. When the browser coalesces callbacks, relying
+         * on them alone means a genuinely new frame sits on screen unrefreshed
+         * until the next callback happens to arrive. So the media element's own
+         * clock is the second opinion: if `currentTime` has advanced by a frame
+         * interval since the last thing we drew, there is new picture to show
+         * whether or not a callback told us.
+         *
+         * This is still strictly per-media-frame work. With the media paused or
+         * stalled neither condition fires and nothing expensive happens, which
+         * is what keeps this from becoming an ambient 60 Hz enhancement loop.
+         */
+        const v = this.video;
+        let fresh = this._pendingFrame;
+        if (!fresh && v && Number.isFinite(v.currentTime) && this._lastDrawnMediaTime !== null) {
+          const interval = this.frameBudgetMs() / 1000;
+          if (v.currentTime - this._lastDrawnMediaTime >= interval * 0.9) {
+            fresh = true;
+            this._lateDetectedSinceStats++;
+          }
+        }
+        if (!fresh && !this._needsDraw) return;
+
+        /*
+         * Hold a frame that is not due yet.
+         *
+         * `expectedDisplayTime` is the timestamp the compositor intends to show
+         * this frame at. Committing it a refresh early is what produced the
+         * irregular 1-and-4 refresh gaps measured earlier; waiting for the
+         * refresh it belongs to keeps the 3,2 pattern a 23.976 fps source needs
+         * on a 60 Hz panel. Only ever a *hold*, never a sleep or a spin - the
+         * next rAF is already scheduled.
+         */
+        if (fresh && this._pendingDisplayTime && Number.isFinite(now)) {
+          const refresh = this._refreshIntervalMs(now);
+          if (this._pendingDisplayTime - now > refresh * 1.5) return;
+        }
+
         this._pendingFrame = false;
+        this._pendingDisplayTime = 0;
+        if (v && Number.isFinite(v.currentTime)) this._lastDrawnMediaTime = v.currentTime;
         this._drawSafe();
       };
       this._presentLoop = present;
       if (!this.video.paused) this._rafHandle = requestAnimationFrame(present);
+    }
+
+    /**
+     * The display's refresh interval, learned rather than assumed.
+     *
+     * 60 Hz is the common case and not the only one; a 120 Hz panel would make
+     * a fixed 16.7 ms hold window nearly two refreshes long.
+     */
+    _refreshIntervalMs(now) {
+      if (Number.isFinite(now) && this._lastRafAt) {
+        const gap = now - this._lastRafAt;
+        if (gap > 1 && gap < 100) {
+          this._refreshMs = this._refreshMs ? this._refreshMs * 0.9 + gap * 0.1 : gap;
+        }
+      }
+      if (Number.isFinite(now)) this._lastRafAt = now;
+      return this._refreshMs || 16.7;
     }
 
     /** Restart the presentation loop when the media starts moving again. */
@@ -950,9 +1071,23 @@
         // Source frames that never became an enhanced frame. Measured from our
         // own counters, so it describes the enhanced picture rather than the
         // hidden element the decoder is accounting for.
+        /*
+         * Where the missing frames went.
+         *
+         * `seen` is media frames the compositor actually presented, so the
+         * shortfall is real rather than an artefact of how often our callback
+         * happened to run. It is split by cause because "0% missed" beside a
+         * 22.7 fps source and a 14.5 fps enhanced picture is not an answer:
+         *
+         *   superseded  a frame was replaced before we drew it (scheduling)
+         *   skipped     a draw was already in flight (compute)
+         */
         const seen = this._sourceFrames;
         const drawn = this._framesSinceStats;
-        const missRate = seen > 0 ? Math.max(0, Math.min(1, (seen - drawn) / seen)) : 0;
+        const missing = Math.max(0, seen - drawn);
+        const missRate = seen > 0 ? Math.min(1, missing / seen) : 0;
+        const computeMisses = Math.min(missing, this._skippedSinceStats);
+        const presentationMisses = Math.max(0, missing - computeMisses);
 
         this.stats.fps = Math.round((drawn * 1000) / elapsed);
         this.stats.enhancedFps = Math.round((drawn * 1000) / elapsed * 10) / 10;
@@ -969,6 +1104,12 @@
         this.stats.frameBudgetMs = Math.round(this.frameBudgetMs() * 10) / 10;
         this.stats.skipped = this._skippedSinceStats;
         this.stats.missRate = Math.round(missRate * 1000) / 10;
+        this.stats.framesOffered = seen;
+        this.stats.framesPresented = drawn;
+        this.stats.superseded = this._supersededSinceStats;
+        this.stats.computeMisses = computeMisses;
+        this.stats.presentationMisses = presentationMisses;
+        this.stats.lateDetected = this._lateDetectedSinceStats;
         this.stats.mediaVsWall = Math.round(mediaVsWall * 1000) / 1000;
         this.stats.policy = this.policy;
 
@@ -981,6 +1122,8 @@
         this._skippedSinceStats = 0;
         this._framesSinceStats = 0;
         this._sourceFrames = 0;
+        this._supersededSinceStats = 0;
+        this._lateDetectedSinceStats = 0;
         this._lastStatsAt = now;
 
         if (this.adaptive) this._adapt({ gpuMs, cpuMs: avg, missRate, mediaVsWall });
